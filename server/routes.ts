@@ -50,7 +50,15 @@ import {
   computeScheduleStatus,
   getServerWibNow,
 } from './time.ts';
-import type { ImportDocType, SupervisionScheduleItem } from '../src/types.ts';
+import type {
+  ChecklistDocStatus,
+  DocumentChecklistItem,
+  ImportDocType,
+  ImportPageLog,
+  ImportRowIssue,
+  ImportSummaryReport,
+  SupervisionScheduleItem,
+} from '../src/types.ts';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -979,9 +987,415 @@ export function createApiRouter(): express.Router {
     '/admin/students',
     requireAuth,
     requireAdmin,
-    asyncHandler(async (_req, res) => {
-      const rows = await query(`SELECT * FROM students ORDER BY nomor_peserta ASC`);
-      res.json(rows);
+    asyncHandler(async (req, res) => {
+      const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+      const kelas = typeof req.query.kelas === 'string' ? req.query.kelas.trim() : '';
+      const sesi = typeof req.query.sesi === 'string' ? req.query.sesi.trim() : '';
+      const ruang = typeof req.query.ruang === 'string' ? req.query.ruang.trim() : '';
+      const status = typeof req.query.status === 'string' ? req.query.status.trim() : '';
+      const exportAll = req.query.all === '1' || req.query.all === 'true';
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const pageSize = Math.min(200, Math.max(10, Number(req.query.pageSize) || 25));
+
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+
+      if (q) {
+        params.push(`%${q}%`);
+        const idx = params.length;
+        conditions.push(
+          `(st.nama ILIKE $${idx} OR COALESCE(st.nisn, '') ILIKE $${idx} OR COALESCE(st.nis, '') ILIKE $${idx} OR st.nomor_peserta ILIKE $${idx})`
+        );
+      }
+      if (kelas) {
+        params.push(kelas);
+        conditions.push(`st.kelas = $${params.length}`);
+      }
+      if (sesi) {
+        params.push(sesi);
+        conditions.push(`COALESCE(st.sesi, '') = $${params.length}`);
+      }
+      if (ruang) {
+        params.push(ruang);
+        conditions.push(`COALESCE(st.ruang, rm.kode, '') = $${params.length}`);
+      }
+      if (status) {
+        params.push(status);
+        conditions.push(`COALESCE(st.status, 'Aktif') = $${params.length}`);
+      }
+
+      const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const baseFrom = `
+        FROM students st
+        LEFT JOIN LATERAL (
+          SELECT se.room_id, se.kode_kursi
+          FROM seats se
+          WHERE se.student_id = st.id
+          ORDER BY se.id ASC
+          LIMIT 1
+        ) se ON TRUE
+        LEFT JOIN rooms rm ON rm.id = se.room_id
+      `;
+
+      const countRow = await queryOne<{ total: number }>(
+        `SELECT COUNT(*)::int AS total ${baseFrom} ${whereSql}`,
+        params
+      );
+      const total = Number(countRow?.total ?? 0);
+
+      const selectSql = `
+        SELECT st.id, st.exam_id, st.no_urut, st.nomor_peserta, st.nisn, st.nis, st.nama,
+               st.jk, st.kelas, st.user_ujian, st.password_ujian, st.sesi,
+               COALESCE(st.ruang, rm.kode) AS ruang,
+               COALESCE(st.meja, se.kode_kursi) AS meja,
+               COALESCE(st.status, 'Aktif') AS status,
+               st.updated_at
+        ${baseFrom}
+        ${whereSql}
+        ORDER BY
+          CASE WHEN COALESCE(st.no_urut, '') ~ '^[0-9]+$' THEN st.no_urut::int ELSE 999999 END ASC,
+          st.nomor_peserta ASC,
+          st.id ASC
+      `;
+
+      const items = exportAll
+        ? await query(selectSql, params)
+        : await query(`${selectSql} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [
+            ...params,
+            pageSize,
+            (page - 1) * pageSize,
+          ]);
+
+      const [kelasRows, sesiRows, ruangRows, statusRows] = await Promise.all([
+        query<{ val: string }>(`SELECT DISTINCT kelas AS val FROM students WHERE COALESCE(kelas, '') <> '' ORDER BY val ASC`),
+        query<{ val: string }>(`SELECT DISTINCT sesi AS val FROM students WHERE COALESCE(sesi, '') <> '' ORDER BY val ASC`),
+        query<{ val: string }>(
+          `SELECT DISTINCT COALESCE(st.ruang, rm.kode) AS val
+           FROM students st
+           LEFT JOIN seats se ON se.student_id = st.id
+           LEFT JOIN rooms rm ON rm.id = se.room_id
+           WHERE COALESCE(st.ruang, rm.kode, '') <> ''
+           ORDER BY val ASC`
+        ),
+        query<{ val: string }>(
+          `SELECT DISTINCT COALESCE(status, 'Aktif') AS val FROM students ORDER BY val ASC`
+        ),
+      ]);
+
+      res.json({
+        items,
+        total,
+        page: exportAll ? 1 : page,
+        pageSize: exportAll ? Math.max(1, total) : pageSize,
+        totalPages: exportAll ? 1 : Math.max(1, Math.ceil(total / pageSize)),
+        filterOptions: {
+          kelasList: kelasRows.map((r) => r.val),
+          sesiList: sesiRows.map((r) => r.val),
+          ruangList: ruangRows.map((r) => r.val),
+          statusList: statusRows.length > 0 ? statusRows.map((r) => r.val) : ['Aktif'],
+        },
+      });
+    })
+  );
+
+  router.post(
+    '/admin/students',
+    requireAuth,
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      const b = req.body as Record<string, unknown>;
+      const nomorPeserta = b.nomor_peserta ? String(b.nomor_peserta).trim() : '';
+      const nama = b.nama ? String(b.nama).trim() : '';
+      const kelas = b.kelas ? String(b.kelas).trim() : '';
+      if (!nomorPeserta || !nama || !kelas) {
+        res.status(400).json({ error: 'Nomor Peserta, Nama Lengkap, dan Kelas wajib diisi.' });
+        return;
+      }
+
+      let examId = b.exam_id ? Number(b.exam_id) : 0;
+      if (!examId) {
+        const latestExam = await queryOne<{ id: number }>(`SELECT id FROM exams ORDER BY id DESC LIMIT 1`);
+        if (latestExam) {
+          examId = Number(latestExam.id);
+        } else {
+          const today = getServerWibNow().date;
+          const newExam = await queryOne<{ id: number }>(
+            `INSERT INTO exams (nama, madrasah_nama, tahun_ajaran, tanggal_mulai, tanggal_selesai, status, warning_minutes_before_end, created_at)
+             VALUES ($1, $2, $3, $4, $5, 'aktif', 15, $6) RETURNING id`,
+            ['Asesmen Sumatif Akhir Tahun Madrasah', 'MAN 1 Nusantara', '2026/2027', today, today, getServerWibNow().isoWib]
+          );
+          examId = Number(newExam!.id);
+          await ensureGeneratedDocRows(examId, req.authUser!.id);
+        }
+      }
+
+      const dup = await queryOne<{ id: number }>(
+        `SELECT id FROM students WHERE exam_id = $1 AND nomor_peserta = $2`,
+        [examId, nomorPeserta]
+      );
+      if (dup) {
+        res.status(409).json({ error: `Nomor Peserta "${nomorPeserta}" sudah terdaftar pada ujian ini.` });
+        return;
+      }
+
+      const now = getServerWibNow().isoWib;
+      const cleanOpt = (v: unknown) => (v !== null && v !== undefined && String(v).trim() !== '' ? String(v).trim() : null);
+      const inserted = await queryOne(
+        `INSERT INTO students (
+           exam_id, no_urut, nomor_peserta, nisn, nis, nama, jk, kelas,
+           user_ujian, password_ujian, sesi, ruang, meja, status, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING *`,
+        [
+          examId,
+          cleanOpt(b.no_urut),
+          nomorPeserta,
+          cleanOpt(b.nisn),
+          cleanOpt(b.nis),
+          nama,
+          cleanOpt(b.jk),
+          kelas,
+          cleanOpt(b.user_ujian),
+          cleanOpt(b.password_ujian),
+          cleanOpt(b.sesi),
+          cleanOpt(b.ruang),
+          cleanOpt(b.meja),
+          cleanOpt(b.status) || 'Aktif',
+          now,
+        ]
+      );
+
+      await appendAuditLog({
+        userId: req.authUser!.id,
+        username: req.authUser!.username,
+        aksi: 'CREATE_STUDENT',
+        entitas: 'students',
+        entitasId: Number((inserted as { id: number }).id),
+        nilaiBaru: { nomor_peserta: nomorPeserta, nama, kelas },
+        ip: getClientIp(req),
+      });
+
+      res.status(201).json({ ok: true, student: inserted });
+    })
+  );
+
+  router.put(
+    '/admin/students/:id',
+    requireAuth,
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      const id = Number(req.params.id);
+      const existing = await queryOne<Record<string, unknown>>(`SELECT * FROM students WHERE id = $1`, [id]);
+      if (!existing) {
+        res.status(404).json({ error: 'Data peserta tidak ditemukan.' });
+        return;
+      }
+
+      const b = req.body as Record<string, unknown>;
+      const nomorPeserta = b.nomor_peserta ? String(b.nomor_peserta).trim() : String(existing.nomor_peserta);
+      const nama = b.nama ? String(b.nama).trim() : String(existing.nama);
+      const kelas = b.kelas ? String(b.kelas).trim() : String(existing.kelas);
+      if (!nomorPeserta || !nama || !kelas) {
+        res.status(400).json({ error: 'Nomor Peserta, Nama Lengkap, dan Kelas wajib diisi.' });
+        return;
+      }
+
+      if (nomorPeserta !== String(existing.nomor_peserta)) {
+        const dup = await queryOne<{ id: number }>(
+          `SELECT id FROM students WHERE exam_id = $1 AND nomor_peserta = $2 AND id <> $3`,
+          [existing.exam_id, nomorPeserta, id]
+        );
+        if (dup) {
+          res.status(409).json({ error: `Nomor Peserta "${nomorPeserta}" sudah digunakan peserta lain.` });
+          return;
+        }
+      }
+
+      const now = getServerWibNow().isoWib;
+      const cleanOpt = (v: unknown) => (v !== null && v !== undefined && String(v).trim() !== '' ? String(v).trim() : null);
+      const updated = await queryOne(
+        `UPDATE students
+         SET no_urut = $1, nomor_peserta = $2, nisn = $3, nis = $4, nama = $5,
+             jk = $6, kelas = $7, user_ujian = $8, password_ujian = $9,
+             sesi = $10, ruang = $11, meja = $12, status = $13, updated_at = $14
+         WHERE id = $15
+         RETURNING *`,
+        [
+          cleanOpt(b.no_urut),
+          nomorPeserta,
+          cleanOpt(b.nisn),
+          cleanOpt(b.nis),
+          nama,
+          cleanOpt(b.jk),
+          kelas,
+          cleanOpt(b.user_ujian),
+          cleanOpt(b.password_ujian),
+          cleanOpt(b.sesi),
+          cleanOpt(b.ruang),
+          cleanOpt(b.meja),
+          cleanOpt(b.status) || 'Aktif',
+          now,
+          id,
+        ]
+      );
+
+      await appendAuditLog({
+        userId: req.authUser!.id,
+        username: req.authUser!.username,
+        aksi: 'UPDATE_STUDENT',
+        entitas: 'students',
+        entitasId: id,
+        nilaiLama: { nomor_peserta: existing.nomor_peserta, nama: existing.nama, kelas: existing.kelas },
+        nilaiBaru: { nomor_peserta: nomorPeserta, nama, kelas },
+        ip: getClientIp(req),
+      });
+
+      res.json({ ok: true, student: updated });
+    })
+  );
+
+  router.delete(
+    '/admin/students/:id',
+    requireAuth,
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      const id = Number(req.params.id);
+      const existing = await queryOne<{ id: number; nomor_peserta: string; nama: string }>(
+        `SELECT id, nomor_peserta, nama FROM students WHERE id = $1`,
+        [id]
+      );
+      if (!existing) {
+        res.status(404).json({ error: 'Data peserta tidak ditemukan.' });
+        return;
+      }
+
+      await withTransaction(async (client) => {
+        await execute(`UPDATE seats SET student_id = NULL WHERE student_id = $1`, [id], client);
+        await execute(`DELETE FROM students WHERE id = $1`, [id], client);
+      });
+
+      await appendAuditLog({
+        userId: req.authUser!.id,
+        username: req.authUser!.username,
+        aksi: 'DELETE_STUDENT',
+        entitas: 'students',
+        entitasId: id,
+        nilaiLama: existing,
+        ip: getClientIp(req),
+      });
+
+      res.json({ ok: true });
+    })
+  );
+
+  router.get(
+    '/admin/students/export/xlsx',
+    requireAuth,
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+      const kelas = typeof req.query.kelas === 'string' ? req.query.kelas.trim() : '';
+      const sesi = typeof req.query.sesi === 'string' ? req.query.sesi.trim() : '';
+      const ruang = typeof req.query.ruang === 'string' ? req.query.ruang.trim() : '';
+      const status = typeof req.query.status === 'string' ? req.query.status.trim() : '';
+
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      if (q) {
+        params.push(`%${q}%`);
+        const idx = params.length;
+        conditions.push(
+          `(st.nama ILIKE $${idx} OR COALESCE(st.nisn, '') ILIKE $${idx} OR COALESCE(st.nis, '') ILIKE $${idx} OR st.nomor_peserta ILIKE $${idx})`
+        );
+      }
+      if (kelas) {
+        params.push(kelas);
+        conditions.push(`st.kelas = $${params.length}`);
+      }
+      if (sesi) {
+        params.push(sesi);
+        conditions.push(`COALESCE(st.sesi, '') = $${params.length}`);
+      }
+      if (ruang) {
+        params.push(ruang);
+        conditions.push(`COALESCE(st.ruang, rm.kode, '') = $${params.length}`);
+      }
+      if (status) {
+        params.push(status);
+        conditions.push(`COALESCE(st.status, 'Aktif') = $${params.length}`);
+      }
+
+      const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const rows = await query<Record<string, unknown>>(
+        `SELECT st.no_urut, st.nisn, st.nis, st.nama, st.jk, st.kelas, st.nomor_peserta,
+                st.user_ujian, st.password_ujian, st.sesi,
+                COALESCE(st.ruang, rm.kode) AS ruang,
+                COALESCE(st.meja, se.kode_kursi) AS meja,
+                COALESCE(st.status, 'Aktif') AS status
+         FROM students st
+         LEFT JOIN LATERAL (
+           SELECT se.room_id, se.kode_kursi FROM seats se WHERE se.student_id = st.id ORDER BY se.id ASC LIMIT 1
+         ) se ON TRUE
+         LEFT JOIN rooms rm ON rm.id = se.room_id
+         ${whereSql}
+         ORDER BY
+           CASE WHEN COALESCE(st.no_urut, '') ~ '^[0-9]+$' THEN st.no_urut::int ELSE 999999 END ASC,
+           st.nomor_peserta ASC,
+           st.id ASC`,
+        params
+      );
+
+      const headers = [
+        'No',
+        'NISN',
+        'NIS',
+        'Nama Lengkap',
+        'JK',
+        'Kelas',
+        'Nomor Peserta',
+        'User Ujian',
+        'Password Ujian',
+        'Sesi',
+        'Ruang',
+        'Meja',
+        'Status',
+      ];
+      const aoa: string[][] = [
+        headers,
+        ...rows.map((r, idx) => [
+          r.no_urut ? String(r.no_urut) : String(idx + 1),
+          r.nisn ? String(r.nisn) : '',
+          r.nis ? String(r.nis) : '',
+          r.nama ? String(r.nama) : '',
+          r.jk ? String(r.jk) : '',
+          r.kelas ? String(r.kelas) : '',
+          r.nomor_peserta ? String(r.nomor_peserta) : '',
+          r.user_ujian ? String(r.user_ujian) : '',
+          r.password_ujian ? String(r.password_ujian) : '',
+          r.sesi ? String(r.sesi) : '',
+          r.ruang ? String(r.ruang) : '',
+          r.meja ? String(r.meja) : '',
+          r.status ? String(r.status) : 'Aktif',
+        ]),
+      ];
+
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      // Force string format on all cells so leading zeros (NISN/NIS/Nomor Peserta) stay intact
+      for (const cellAddr of Object.keys(ws)) {
+        if (cellAddr.startsWith('!')) continue;
+        ws[cellAddr].t = 's';
+        ws[cellAddr].z = '@';
+      }
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Data Peserta');
+      const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      );
+      res.setHeader('Content-Disposition', 'attachment; filename="Data_Peserta_SIPENGUJI.xlsx"');
+      res.send(buf);
     })
   );
 
@@ -1223,15 +1637,230 @@ export function createApiRouter(): express.Router {
   });
 
   router.get(
+    '/admin/import/checklist',
+    requireAuth,
+    requireAdmin,
+    asyncHandler(async (_req, res) => {
+      const stages: Array<{
+        stageKey: ImportDocType;
+        label: string;
+        required: boolean;
+        aliases: ImportDocType[];
+      }> = [
+        {
+          stageKey: 'data_peserta',
+          label: '1. Data Peserta / DNPU',
+          required: true,
+          aliases: ['data_peserta', 'daftar_hadir_peserta'],
+        },
+        {
+          stageKey: 'data_pengawas',
+          label: '2. Data Pengawas',
+          required: true,
+          aliases: ['data_pengawas'],
+        },
+        {
+          stageKey: 'denah_peserta',
+          label: '3. Denah Peserta',
+          required: true,
+          aliases: ['denah_peserta', 'pembagian_ruang', 'denah_lingkungan'],
+        },
+        {
+          stageKey: 'jadwal_pengawasan',
+          label: '4. Jadwal Pengawasan',
+          required: true,
+          aliases: ['jadwal_pengawasan', 'jadwal_ujian'],
+        },
+        {
+          stageKey: 'dokumen_pendukung',
+          label: '5. Dokumen Pendukung Lainnya',
+          required: false,
+          aliases: ['dokumen_pendukung'],
+        },
+      ];
+
+      const allBatches = await query<Record<string, unknown>>(
+        `SELECT id, filename, target_type, detected_type, status, summary_json, errors_json, duplicates_json, extracted_json, created_at, confirmed_at
+         FROM import_batches
+         ORDER BY id DESC
+         LIMIT 200`
+      );
+
+      const checklist: DocumentChecklistItem[] = stages.map((st) => {
+        const latest = allBatches.find((b) => {
+          const tt = b.target_type ? String(b.target_type) : '';
+          const dt = b.detected_type ? String(b.detected_type) : '';
+          if (tt) return tt === st.stageKey || st.aliases.includes(tt as ImportDocType);
+          return dt === st.stageKey || st.aliases.includes(dt as ImportDocType);
+        });
+
+        if (!latest) {
+          return {
+            stageKey: st.stageKey,
+            label: st.label,
+            required: st.required,
+            status: 'Belum Diunggah',
+            latestBatchId: null,
+            filename: null,
+            uploadedAt: null,
+            confirmedAt: null,
+            totalRows: 0,
+            readCount: 0,
+            failedCount: 0,
+            skippedCount: 0,
+            insertedCount: 0,
+            updatedCount: 0,
+            unchangedCount: 0,
+            duplicatesCount: 0,
+            skipReasons: [],
+            missingNote: st.required
+              ? 'Dokumen wajib ini belum diunggah.'
+              : 'Opsional — unggah bila ada surat keputusan atau dokumen pendukung.',
+          };
+        }
+
+        let summaryObj: (Partial<ImportSummaryReport> & { pageLogs?: ImportPageLog[]; rowIssues?: ImportRowIssue[] }) | null = null;
+        try {
+          if (latest.summary_json) summaryObj = JSON.parse(String(latest.summary_json));
+        } catch {
+          summaryObj = null;
+        }
+        let errorsArr: Array<{ rowIndex?: number; field?: string; reason?: string }> = [];
+        try {
+          errorsArr = JSON.parse(String(latest.errors_json || '[]'));
+        } catch {
+          errorsArr = [];
+        }
+        let dupsArr: Array<{ rowIndex?: number; field?: string; value?: string; source?: string }> = [];
+        try {
+          dupsArr = JSON.parse(String(latest.duplicates_json || '[]'));
+        } catch {
+          dupsArr = [];
+        }
+        let extractedArr: unknown[] = [];
+        try {
+          extractedArr = JSON.parse(String(latest.extracted_json || '[]'));
+        } catch {
+          extractedArr = [];
+        }
+
+        const totalRows = Number(summaryObj?.totalRows ?? extractedArr.length ?? 0);
+        const insertedCount = Number(summaryObj?.inserted ?? 0);
+        const updatedCount = Number(summaryObj?.updated ?? 0);
+        const unchangedCount = Number(summaryObj?.unchanged ?? 0);
+        const duplicatesCount = Number(summaryObj?.duplicatesCount ?? dupsArr.length ?? 0);
+        const failedCount = Number(summaryObj?.failedCount ?? errorsArr.filter((e) => (e.rowIndex ?? 0) >= 0).length ?? 0);
+        const skippedCount = Number(summaryObj?.skippedCount ?? duplicatesCount + failedCount);
+        const readCount =
+          latest.status === 'confirmed'
+            ? Number(summaryObj?.parsedCount ?? insertedCount + updatedCount + unchangedCount)
+            : Math.max(0, totalRows - failedCount);
+
+        const skipReasonsSet = new Set<string>();
+        for (const fr of summaryObj?.failureReasons || []) {
+          if (fr?.reason) skipReasonsSet.add(fr.reason);
+        }
+        for (const errItem of errorsArr) {
+          if (errItem?.reason) skipReasonsSet.add(errItem.reason);
+        }
+        if (summaryObj?.archiveOnlyNote) skipReasonsSet.add(summaryObj.archiveOnlyNote);
+
+        let status: ChecklistDocStatus = 'Belum Diunggah';
+        let missingNote: string | null = null;
+        const batchStatus = String(latest.status);
+
+        if (batchStatus === 'failed') {
+          status = 'Gagal Diproses';
+          missingNote = errorsArr[0]?.reason || 'Proses ekstraksi gagal. Periksa berkas dan unggah ulang.';
+        } else if (batchStatus === 'preview') {
+          if (st.stageKey === 'dokumen_pendukung') {
+            status = 'Berhasil Diunggah';
+            missingNote = 'Menunggu konfirmasi simpan arsip oleh Admin.';
+          } else {
+            status = 'Perlu Pemeriksaan';
+            missingNote =
+              failedCount > 0 || duplicatesCount > 0
+                ? `${failedCount} baris gagal validasi dan ${duplicatesCount} duplikat menunggu pemeriksaan sebelum KONFIRMASI SIMPAN.`
+                : 'Data berhasil diekstrak ke pratinjau; klik KONFIRMASI SIMPAN untuk menyimpan permanen.';
+          }
+        } else if (batchStatus === 'confirmed') {
+          if (st.stageKey === 'dokumen_pendukung') {
+            status = 'Berhasil Diproses';
+            missingNote = null;
+          } else if (readCount === 0 || failedCount > 0) {
+            status = 'Perlu Pemeriksaan';
+            missingNote =
+              readCount === 0
+                ? 'Tidak ada baris valid yang tersimpan pada konfirmasi terakhir.'
+                : `${failedCount} baris gagal / ${skippedCount} baris dilewati pada impor terakhir.`;
+          } else {
+            status = 'Berhasil Diproses';
+            missingNote = null;
+          }
+        }
+
+        return {
+          stageKey: st.stageKey,
+          label: st.label,
+          required: st.required,
+          status,
+          latestBatchId: Number(latest.id),
+          filename: latest.filename ? String(latest.filename) : null,
+          uploadedAt: latest.created_at ? String(latest.created_at) : null,
+          confirmedAt: latest.confirmed_at ? String(latest.confirmed_at) : null,
+          totalRows,
+          readCount,
+          failedCount,
+          skippedCount,
+          insertedCount,
+          updatedCount,
+          unchangedCount,
+          duplicatesCount,
+          skipReasons: Array.from(skipReasonsSet).slice(0, 6),
+          missingNote,
+        };
+      });
+
+      const overallReady = checklist
+        .filter((c) => c.required)
+        .every((c) => c.status === 'Berhasil Diproses');
+
+      res.json({ checklist, overallReady });
+    })
+  );
+
+  router.get(
     '/admin/import/batches',
     requireAuth,
     requireAdmin,
     asyncHandler(async (_req, res) => {
-      const rows = await query(
-        `SELECT id, exam_id, filename, sha256, detected_type, confidence, status, created_at, confirmed_at
+      const rows = await query<Record<string, unknown>>(
+        `SELECT id, exam_id, filename, sha256, target_type, detected_type, confidence, status, summary_json, created_at, confirmed_at
          FROM import_batches ORDER BY id DESC LIMIT 50`
       );
-      res.json(rows);
+      res.json(
+        rows.map((r) => {
+          let summary: ImportSummaryReport | null = null;
+          try {
+            if (r.summary_json) summary = JSON.parse(String(r.summary_json));
+          } catch {
+            summary = null;
+          }
+          return {
+            id: Number(r.id),
+            exam_id: r.exam_id ? Number(r.exam_id) : null,
+            filename: r.filename,
+            sha256: r.sha256,
+            target_type: r.target_type || null,
+            detected_type: r.detected_type,
+            confidence: Number(r.confidence),
+            status: r.status,
+            summary,
+            created_at: r.created_at,
+            confirmed_at: r.confirmed_at,
+          };
+        })
+      );
     })
   );
 
@@ -1246,6 +1875,22 @@ export function createApiRouter(): express.Router {
         return;
       }
 
+      const validTargetTypes: ImportDocType[] = [
+        'data_peserta',
+        'data_pengawas',
+        'jadwal_ujian',
+        'jadwal_pengawasan',
+        'pembagian_ruang',
+        'denah_peserta',
+        'daftar_hadir_peserta',
+        'denah_lingkungan',
+        'dokumen_pendukung',
+      ];
+      const targetTypeRaw = typeof req.body.targetType === 'string' ? req.body.targetType.trim() : '';
+      const targetType = validTargetTypes.includes(targetTypeRaw as ImportDocType)
+        ? (targetTypeRaw as ImportDocType)
+        : null;
+
       const stored = await persistDocumentBytes({
         buffer: req.file.buffer,
         originalName: req.file.originalname,
@@ -1255,12 +1900,23 @@ export function createApiRouter(): express.Router {
       const examIdRaw = req.body.examId ? Number(req.body.examId) : null;
       const now = getServerWibNow().isoWib;
 
+      // Informational check only: never block or skip processing on duplicate file hash
+      const previousSameFile = await queryOne<{ id: number; filename: string; created_at: string }>(
+        `SELECT id, filename, created_at FROM import_batches WHERE sha256 = $1 ORDER BY id DESC LIMIT 1`,
+        [stored.sha256]
+      );
+      const fileDuplicateWarning = previousSameFile
+        ? `File identik ("${previousSameFile.filename}") pernah diunggah pada ${previousSameFile.created_at}. Isi file tetap diperiksa ulang penuh tanpa memblokir.`
+        : null;
+
       try {
         const extracted = await extractDocumentFromBuffer(
           req.file.buffer,
           req.file.originalname,
           req.file.mimetype,
-          examIdRaw
+          examIdRaw,
+          targetType,
+          fileDuplicateWarning
         );
 
         await execute(
@@ -1280,20 +1936,29 @@ export function createApiRouter(): express.Router {
           ]
         );
 
+        const summaryPayload = {
+          ...extracted.summary,
+          pageLogs: extracted.page_logs,
+          rowIssues: extracted.row_issues,
+          fileDuplicateWarning,
+        };
+
         const batchInserted = await queryOne<{ id: number }>(
-          `INSERT INTO import_batches (exam_id, filename, file_path, sha256, detected_type, confidence, status, extracted_json, errors_json, duplicates_json, uploaded_by, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, 'preview', $7, $8, $9, $10, $11)
+          `INSERT INTO import_batches (exam_id, filename, file_path, sha256, target_type, detected_type, confidence, status, extracted_json, errors_json, duplicates_json, summary_json, uploaded_by, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'preview', $8, $9, $10, $11, $12, $13)
            RETURNING id`,
           [
             examIdRaw,
             stored.safeFilename,
             stored.storagePath,
             stored.sha256,
+            targetType || extracted.detected_type,
             extracted.detected_type,
             extracted.confidence,
             JSON.stringify(extracted.rows),
             JSON.stringify(extracted.unreadable_fields),
             JSON.stringify(extracted.duplicates),
+            JSON.stringify(summaryPayload),
             req.authUser!.id,
             now,
           ]
@@ -1309,6 +1974,7 @@ export function createApiRouter(): express.Router {
           nilaiBaru: {
             filename: stored.safeFilename,
             sha256: stored.sha256,
+            target_type: targetType || extracted.detected_type,
             detected_type: extracted.detected_type,
             rowCount: extracted.rows.length,
           },
@@ -1320,12 +1986,17 @@ export function createApiRouter(): express.Router {
           exam_id: examIdRaw,
           filename: stored.safeFilename,
           sha256: stored.sha256,
+          target_type: targetType || extracted.detected_type,
           detected_type: extracted.detected_type,
           confidence: extracted.confidence,
           status: 'preview',
           extracted_rows: extracted.rows,
           unreadable_fields: extracted.unreadable_fields,
           duplicates: extracted.duplicates,
+          file_duplicate_warning: fileDuplicateWarning,
+          page_logs: extracted.page_logs,
+          row_issues: extracted.row_issues,
+          summary: extracted.summary,
           created_at: now,
           confirmed_at: null,
           storage_provider: stored.storageProvider,
@@ -1333,21 +2004,43 @@ export function createApiRouter(): express.Router {
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Gagal mengekstrak dokumen.';
+        const pageLogs = ((err as { pageLogs?: ImportPageLog[] })?.pageLogs || []) as ImportPageLog[];
+        const errSummary = {
+          totalRows: 0,
+          parsedCount: 0,
+          inserted: 0,
+          updated: 0,
+          unchanged: 0,
+          duplicatesCount: 0,
+          failedCount: Math.max(1, pageLogs.filter((p) => p.status === 'failed').length),
+          skippedCount: 0,
+          failureReasons: [{ rowIndex: -1, field: 'file', reason: msg }],
+          pageLogs,
+          fileDuplicateWarning,
+        };
         const batchFailed = await queryOne<{ id: number }>(
-          `INSERT INTO import_batches (exam_id, filename, file_path, sha256, detected_type, confidence, status, extracted_json, errors_json, uploaded_by, created_at)
-           VALUES ($1, $2, $3, $4, 'dokumen_pendukung', 0, 'failed', '[]', $5, $6, $7)
+          `INSERT INTO import_batches (exam_id, filename, file_path, sha256, target_type, detected_type, confidence, status, extracted_json, errors_json, summary_json, uploaded_by, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 0, 'failed', '[]', $7, $8, $9, $10)
            RETURNING id`,
           [
             examIdRaw,
             stored.safeFilename,
             stored.storagePath,
             stored.sha256,
+            targetType || 'dokumen_pendukung',
+            targetType || 'dokumen_pendukung',
             JSON.stringify([{ rowIndex: -1, field: 'file', reason: msg }]),
+            JSON.stringify(errSummary),
             req.authUser!.id,
             now,
           ]
         );
-        res.status(422).json({ error: msg, batchId: Number(batchFailed!.id) });
+        res.status(422).json({
+          error: msg,
+          batchId: Number(batchFailed!.id),
+          page_logs: pageLogs,
+          target_type: targetType || 'dokumen_pendukung',
+        });
       }
     })
   );
@@ -1517,17 +2210,29 @@ export function createApiRouter(): express.Router {
         res.status(404).json({ error: 'Batch impor tidak ditemukan.' });
         return;
       }
+      let summaryObj: (ImportSummaryReport & { pageLogs?: ImportPageLog[]; rowIssues?: ImportRowIssue[]; fileDuplicateWarning?: string | null }) | null = null;
+      try {
+        if (row.summary_json) summaryObj = JSON.parse(String(row.summary_json));
+      } catch {
+        summaryObj = null;
+      }
+
       res.json({
         id: Number(row.id),
         exam_id: row.exam_id ? Number(row.exam_id) : null,
         filename: row.filename,
         sha256: row.sha256,
+        target_type: row.target_type || null,
         detected_type: row.detected_type,
         confidence: Number(row.confidence),
         status: row.status,
         extracted_rows: JSON.parse(String(row.extracted_json || '[]')),
         unreadable_fields: JSON.parse(String(row.errors_json || '[]')),
         duplicates: JSON.parse(String(row.duplicates_json || '[]')),
+        file_duplicate_warning: summaryObj?.fileDuplicateWarning || null,
+        page_logs: summaryObj?.pageLogs || [],
+        row_issues: summaryObj?.rowIssues || [],
+        summary: summaryObj,
         created_at: row.created_at,
         confirmed_at: row.confirmed_at,
       });
@@ -1559,23 +2264,40 @@ export function createApiRouter(): express.Router {
         exam_id?: number | null;
       };
 
+      let existingSummary: { pageLogs?: ImportPageLog[]; fileDuplicateWarning?: string | null } = {};
+      try {
+        if (batch.summary_json) existingSummary = JSON.parse(String(batch.summary_json));
+      } catch {
+        existingSummary = {};
+      }
+
       const nextType = (detected_type || batch.detected_type) as ImportDocType;
       const nextRows = extracted_rows || JSON.parse(String(batch.extracted_json || '[]'));
-      const { unreadable_fields, duplicates } = await detectDuplicatesAndUnreadable(
+      const analysis = await detectDuplicatesAndUnreadable(
         nextType,
         nextRows,
-        exam_id ?? (batch.exam_id as number | null)
+        exam_id ?? (batch.exam_id as number | null),
+        existingSummary.pageLogs || [],
+        existingSummary.fileDuplicateWarning || null
       );
+
+      const summaryPayload = {
+        ...analysis.summary,
+        pageLogs: existingSummary.pageLogs || [],
+        rowIssues: analysis.row_issues,
+        fileDuplicateWarning: existingSummary.fileDuplicateWarning || null,
+      };
 
       await execute(
         `UPDATE import_batches
-         SET detected_type = $1, extracted_json = $2, errors_json = $3, duplicates_json = $4, exam_id = $5
-         WHERE id = $6`,
+         SET detected_type = $1, extracted_json = $2, errors_json = $3, duplicates_json = $4, summary_json = $5, exam_id = $6
+         WHERE id = $7`,
         [
           nextType,
           JSON.stringify(nextRows),
-          JSON.stringify(unreadable_fields),
-          JSON.stringify(duplicates),
+          JSON.stringify(analysis.unreadable_fields),
+          JSON.stringify(analysis.duplicates),
+          JSON.stringify(summaryPayload),
           exam_id ?? batch.exam_id ?? null,
           batchId,
         ]
@@ -1594,8 +2316,10 @@ export function createApiRouter(): express.Router {
       res.json({
         detected_type: nextType,
         extracted_rows: nextRows,
-        unreadable_fields,
-        duplicates,
+        unreadable_fields: analysis.unreadable_fields,
+        duplicates: analysis.duplicates,
+        row_issues: analysis.row_issues,
+        summary: analysis.summary,
       });
     })
   );
@@ -1625,10 +2349,17 @@ export function createApiRouter(): express.Router {
         exam_id?: number | null;
       };
 
+      let prevSummary: { pageLogs?: ImportPageLog[]; fileDuplicateWarning?: string | null } = {};
+      try {
+        if (batch.summary_json) prevSummary = JSON.parse(String(batch.summary_json));
+      } catch {
+        prevSummary = {};
+      }
+
       const docType = (body.detected_type || batch.detected_type) as ImportDocType;
       const rows = body.extracted_rows || JSON.parse(String(batch.extracted_json || '[]'));
 
-      const summary = await commitImportBatch({
+      const commitSummary = await commitImportBatch({
         batchId,
         docType,
         rows,
@@ -1636,17 +2367,36 @@ export function createApiRouter(): express.Router {
         userId: req.authUser!.id,
       });
 
+      const mergedSummary: ImportSummaryReport & { examId: number } = {
+        ...commitSummary,
+        pageLogs: prevSummary.pageLogs || [],
+        fileDuplicateWarning: prevSummary.fileDuplicateWarning || null,
+      };
+
+      await execute(`UPDATE import_batches SET summary_json = $1 WHERE id = $2`, [
+        JSON.stringify(mergedSummary),
+        batchId,
+      ]);
+
       await appendAuditLog({
         userId: req.authUser!.id,
         username: req.authUser!.username,
         aksi: 'CONFIRM_IMPORT_BATCH',
         entitas: 'import_batches',
         entitasId: batchId,
-        nilaiBaru: { docType, ...summary },
+        nilaiBaru: {
+          docType,
+          totalRows: mergedSummary.totalRows,
+          inserted: mergedSummary.inserted,
+          updated: mergedSummary.updated,
+          unchanged: mergedSummary.unchanged,
+          duplicatesCount: mergedSummary.duplicatesCount,
+          failedCount: mergedSummary.failedCount,
+        },
         ip: getClientIp(req),
       });
 
-      res.json({ ok: true, ...summary });
+      res.json({ ok: true, ...mergedSummary });
     })
   );
 

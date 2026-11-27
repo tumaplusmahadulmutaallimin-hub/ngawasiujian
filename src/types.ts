@@ -87,11 +87,20 @@ export interface RoomRecord {
 export interface StudentRecord {
   id: number;
   exam_id: number;
+  no_urut?: string | null;
   nomor_peserta: string;
   nisn: string | null;
   nis: string | null;
   nama: string;
+  jk?: string | null;
   kelas: string;
+  user_ujian?: string | null;
+  password_ujian?: string | null;
+  sesi?: string | null;
+  ruang?: string | null;
+  meja?: string | null;
+  status?: string | null;
+  updated_at?: string | null;
 }
 
 export interface SeatWithState {
@@ -231,11 +240,72 @@ export interface AuditLogRecord {
   ip: string | null;
 }
 
+export type ChecklistDocStatus =
+  | 'Belum Diunggah'
+  | 'Berhasil Diunggah'
+  | 'Sedang Diproses'
+  | 'Perlu Pemeriksaan'
+  | 'Berhasil Diproses'
+  | 'Gagal Diproses';
+
+export interface ImportPageLog {
+  pageNumber: number;
+  method: 'text_layer' | 'ocr_gemini' | 'ocr_tesseract' | 'archive_only' | 'skipped';
+  status: 'success' | 'failed' | 'unmapped';
+  rowCount: number;
+  message?: string | null;
+}
+
+export interface ImportRowIssue {
+  rowIndex: number;
+  kind: 'failed' | 'duplicate' | 'unchanged' | 'warning';
+  field?: string;
+  value?: string;
+  reason: string;
+}
+
+export interface ImportSummaryReport {
+  totalRows: number;
+  parsedCount: number;
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  duplicatesCount: number;
+  failedCount: number;
+  skippedCount: number;
+  failureReasons: Array<{ rowIndex: number; field?: string; value?: string; reason: string }>;
+  pageLogs?: ImportPageLog[];
+  fileDuplicateWarning?: string | null;
+  archiveOnlyNote?: string | null;
+}
+
+export interface DocumentChecklistItem {
+  stageKey: ImportDocType;
+  label: string;
+  required: boolean;
+  status: ChecklistDocStatus;
+  latestBatchId: number | null;
+  filename: string | null;
+  uploadedAt: string | null;
+  confirmedAt: string | null;
+  totalRows: number;
+  readCount: number;
+  failedCount: number;
+  skippedCount: number;
+  insertedCount: number;
+  updatedCount: number;
+  unchangedCount: number;
+  duplicatesCount: number;
+  skipReasons: string[];
+  missingNote: string | null;
+}
+
 export interface ImportBatchRecord {
   id: number;
   exam_id: number | null;
   filename: string;
   sha256: string;
+  target_type?: ImportDocType | null;
   detected_type: ImportDocType;
   confidence: number;
   status: 'preview' | 'confirmed' | 'failed';
@@ -244,6 +314,12 @@ export interface ImportBatchRecord {
   duplicates: Array<{ rowIndex: number; field: string; value: string; source: string }>;
   created_at: string;
   confirmed_at: string | null;
+  file_duplicate_warning?: string | null;
+  page_logs?: ImportPageLog[];
+  row_issues?: ImportRowIssue[];
+  summary?: ImportSummaryReport | null;
+  storage_provider?: 'vercel-blob' | 'postgres-bytea';
+  blob_configured?: boolean;
 }
 
 export interface PendingSyncAction {

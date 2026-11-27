@@ -424,3 +424,86 @@ export function generateRecapPdf(
 
   doc.save(`Rekap_Pengawasan_SIPENGUJI.pdf`);
 }
+
+export function generateStudentsPdf(
+  students: import('../types.ts').StudentRecord[],
+  madrasahName = 'SIPENGUJI'
+): void {
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.text('DAFTAR DATA PESERTA UJIAN (DNPU) — SIPENGUJI', 148, 14, { align: 'center' });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.text(`${madrasahName} · Total Peserta: ${students.length}`, 148, 20, { align: 'center' });
+
+  let y = 26;
+  const cols = [
+    'No',
+    'NISN',
+    'NIS',
+    'Nama Lengkap',
+    'JK',
+    'Kelas',
+    'Nomor Peserta',
+    'User Ujian',
+    'Pass',
+    'Sesi',
+    'Ruang',
+    'Meja',
+    'Status',
+  ];
+  const widths = [9, 24, 18, 52, 9, 22, 30, 26, 22, 18, 16, 13, 18];
+
+  const drawHeader = (startY: number) => {
+    let x = 10;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    cols.forEach((c, i) => {
+      doc.rect(x, startY, widths[i], 7);
+      doc.text(c, x + 1.5, startY + 4.8);
+      x += widths[i];
+    });
+  };
+
+  drawHeader(y);
+  y += 7;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.2);
+
+  students.forEach((st, idx) => {
+    if (y > 192) {
+      doc.addPage();
+      y = 16;
+      drawHeader(y);
+      y += 7;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.2);
+    }
+    let x = 10;
+    const vals = [
+      st.no_urut ? String(st.no_urut) : String(idx + 1),
+      st.nisn || '-',
+      st.nis || '-',
+      (st.nama || '-').slice(0, 28),
+      st.jk || '-',
+      (st.kelas || '-').slice(0, 12),
+      (st.nomor_peserta || '-').slice(0, 18),
+      (st.user_ujian || '-').slice(0, 14),
+      (st.password_ujian || '-').slice(0, 12),
+      (st.sesi || '-').slice(0, 10),
+      (st.ruang || '-').slice(0, 9),
+      (st.meja || '-').slice(0, 7),
+      (st.status || 'Aktif').slice(0, 10),
+    ];
+    vals.forEach((v, i) => {
+      doc.rect(x, y, widths[i], 6.5);
+      doc.text(String(v), x + 1.2, y + 4.4);
+      x += widths[i];
+    });
+    y += 6.5;
+  });
+
+  doc.save('Data_Peserta_SIPENGUJI.pdf');
+}
+

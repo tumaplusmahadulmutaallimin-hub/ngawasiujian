@@ -316,13 +316,32 @@ export async function ensureDbReady(): Promise<void> {
         CREATE TABLE IF NOT EXISTS students (
           id SERIAL PRIMARY KEY,
           exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          no_urut TEXT,
           nomor_peserta TEXT NOT NULL,
           nisn TEXT,
           nis TEXT,
           nama TEXT NOT NULL,
+          jk TEXT,
           kelas TEXT NOT NULL,
+          user_ujian TEXT,
+          password_ujian TEXT,
+          sesi TEXT,
+          ruang TEXT,
+          meja TEXT,
+          status TEXT NOT NULL DEFAULT 'Aktif',
+          updated_at TEXT,
           UNIQUE(exam_id, nomor_peserta)
         );
+
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS no_urut TEXT;
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS jk TEXT;
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS user_ujian TEXT;
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS password_ujian TEXT;
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS sesi TEXT;
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS ruang TEXT;
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS meja TEXT;
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'Aktif';
+        ALTER TABLE students ADD COLUMN IF NOT EXISTS updated_at TEXT;
 
         CREATE TABLE IF NOT EXISTS seats (
           id SERIAL PRIMARY KEY,
@@ -500,16 +519,21 @@ export async function ensureDbReady(): Promise<void> {
           filename TEXT NOT NULL,
           file_path TEXT NOT NULL,
           sha256 TEXT NOT NULL,
+          target_type TEXT,
           detected_type TEXT NOT NULL,
           confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
           status TEXT NOT NULL DEFAULT 'preview' CHECK (status IN ('preview', 'confirmed', 'failed')),
           extracted_json TEXT NOT NULL,
           errors_json TEXT NOT NULL DEFAULT '[]',
           duplicates_json TEXT NOT NULL DEFAULT '[]',
+          summary_json TEXT NOT NULL DEFAULT '{}',
           uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL,
           confirmed_at TEXT
         );
+
+        ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS target_type TEXT;
+        ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS summary_json TEXT NOT NULL DEFAULT '{}';
 
         CREATE TABLE IF NOT EXISTS sessions (
           id TEXT PRIMARY KEY,

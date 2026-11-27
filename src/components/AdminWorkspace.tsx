@@ -7,6 +7,8 @@ import {
   Building2,
   Calendar,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   Clock,
   Download,
@@ -14,31 +16,45 @@ import {
   FileCheck2,
   FileSpreadsheet,
   FileText,
+  Filter,
   FolderArchive,
+  GraduationCap,
   Inbox,
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Pencil,
   Plus,
   RefreshCw,
   ScrollText,
   Search,
   ShieldCheck,
+  Trash2,
   Upload,
   UserCheck,
   Users,
   X,
 } from 'lucide-react';
 import { apiFetch, downloadAuthenticatedFile } from '../lib/api.ts';
-import { generateAdminDocumentPdf, generateRecapPdf, type DocDataset } from '../lib/pdfGenerator.ts';
+import {
+  generateAdminDocumentPdf,
+  generateRecapPdf,
+  generateStudentsPdf,
+  type DocDataset,
+} from '../lib/pdfGenerator.ts';
 import type {
   AuditLogRecord,
   AuthUser,
+  ChecklistDocStatus,
+  DocumentChecklistItem,
   ExamRecord,
   ImportBatchRecord,
   ImportDocType,
+  ImportPageLog,
+  ImportSummaryReport,
   NotificationRecord,
   RoomRecord,
+  StudentRecord,
   SupervisionScheduleItem,
   SupervisorRecord,
 } from '../types.ts';
@@ -63,9 +79,10 @@ interface AdminWorkspaceProps {
 
 type AdminSection =
   | 'monitoring'
-  | 'jadwal'
   | 'impor'
+  | 'peserta'
   | 'dokumen'
+  | 'jadwal'
   | 'ruang'
   | 'pengawas'
   | 'laporan'
@@ -73,7 +90,7 @@ type AdminSection =
   | 'audit';
 
 const DOC_TYPE_LABELS: Record<ImportDocType, string> = {
-  data_peserta: 'Data Peserta',
+  data_peserta: 'Data Peserta / DNPU',
   data_pengawas: 'Data Pengawas',
   jadwal_ujian: 'Jadwal Ujian',
   jadwal_pengawasan: 'Jadwal Pengawasan',
@@ -82,6 +99,100 @@ const DOC_TYPE_LABELS: Record<ImportDocType, string> = {
   daftar_hadir_peserta: 'Daftar Hadir Peserta',
   denah_lingkungan: 'Denah Lingkungan Ujian',
   dokumen_pendukung: 'Dokumen Pendukung Lainnya',
+};
+
+const IMPORT_STAGES: Array<{
+  stageKey: ImportDocType;
+  stepNo: number;
+  title: string;
+  subtitle: string;
+  hasTemplate: boolean;
+}> = [
+  {
+    stageKey: 'data_peserta',
+    stepNo: 1,
+    title: 'Data Peserta / DNPU',
+    subtitle:
+      'Sheet "Data Peserta" (13 kolom: No, NISN, NIS, Nama Lengkap, JK, Kelas, Nomor Peserta, User Ujian, Password Ujian, Sesi, Ruang, Meja, Status)',
+    hasTemplate: true,
+  },
+  {
+    stageKey: 'data_pengawas',
+    stepNo: 2,
+    title: 'Data Pengawas',
+    subtitle: 'Daftar pengawas ruang ujian (Nama Lengkap, NIP/NUPTK, WhatsApp, Kode Verifikasi)',
+    hasTemplate: true,
+  },
+  {
+    stageKey: 'denah_peserta',
+    stepNo: 3,
+    title: 'Denah Peserta',
+    subtitle: 'Pembagian ruang dan posisi kursi peserta (Kode Ruang, Kode Kursi, Baris, Kolom, Nomor Peserta)',
+    hasTemplate: true,
+  },
+  {
+    stageKey: 'jadwal_pengawasan',
+    stepNo: 4,
+    title: 'Jadwal Pengawasan',
+    subtitle: 'Jadwal sesi ujian, mata pelajaran, ruang, serta pengawas utama & pendamping',
+    hasTemplate: true,
+  },
+  {
+    stageKey: 'dokumen_pendukung',
+    stepNo: 5,
+    title: 'Dokumen Pendukung Lainnya',
+    subtitle: 'SK Panitia, tata tertib, atau arsip pendukung lainnya (disimpan permanen tanpa fabrikasi baris)',
+    hasTemplate: false,
+  },
+];
+
+const DNPU_KEY_ORDER = [
+  'no_urut',
+  'nisn',
+  'nis',
+  'nama',
+  'jk',
+  'kelas',
+  'nomor_peserta',
+  'user_ujian',
+  'password_ujian',
+  'sesi',
+  'ruang',
+  'meja',
+  'status',
+];
+
+const FIELD_LABELS: Record<string, string> = {
+  no_urut: 'No',
+  nisn: 'NISN',
+  nis: 'NIS',
+  nama: 'Nama Lengkap',
+  jk: 'JK',
+  kelas: 'Kelas',
+  nomor_peserta: 'Nomor Peserta',
+  user_ujian: 'User Ujian',
+  password_ujian: 'Password Ujian',
+  sesi: 'Sesi',
+  ruang: 'Ruang',
+  meja: 'Meja',
+  status: 'Status',
+  nama_lengkap: 'Nama Lengkap',
+  nip_nuptk: 'NIP / NUPTK',
+  whatsapp: 'WhatsApp',
+  kode_verifikasi: 'Kode Verifikasi',
+  kode_ruang: 'Kode Ruang',
+  nama_ruang: 'Nama Ruang',
+  kode_kursi: 'Kode Kursi',
+  baris: 'Baris',
+  kolom: 'Kolom',
+  nama_sesi: 'Sesi',
+  tanggal: 'Tanggal',
+  jam_mulai: 'Jam Mulai',
+  jam_selesai: 'Jam Selesai',
+  kode_mapel: 'Kode Mapel',
+  mata_pelajaran: 'Mata Pelajaran',
+  pengawas_utama: 'Pengawas Utama',
+  pengawas_pendamping: 'Pengawas Pendamping',
 };
 
 export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
@@ -127,11 +238,67 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
   const [auditQuery, setAuditQuery] = useState('');
 
-  // Import states
+  // Import states (staged)
   const [batches, setBatches] = useState<Array<Record<string, unknown>>>([]);
+  const [checklist, setChecklist] = useState<DocumentChecklistItem[]>([]);
+  const [checklistReady, setChecklistReady] = useState(false);
+  const [stageFiles, setStageFiles] = useState<Partial<Record<ImportDocType, File | null>>>({});
+  const [processingStage, setProcessingStage] = useState<ImportDocType | null>(null);
+  const [stageError, setStageError] = useState<{
+    stageKey: ImportDocType;
+    message: string;
+    pageLogs?: ImportPageLog[];
+  } | null>(null);
   const [activeBatch, setActiveBatch] = useState<ImportBatchRecord | null>(null);
+  const [previewPage, setPreviewPage] = useState(1);
+  const [confirmingBatch, setConfirmingBatch] = useState(false);
+  const [lastImportResult, setLastImportResult] = useState<{
+    filename: string;
+    docType: ImportDocType;
+    summary: ImportSummaryReport;
+  } | null>(null);
+  const [issuesModalReport, setIssuesModalReport] = useState<{
+    title: string;
+    reasons: Array<{ rowIndex: number; field?: string; value?: string; reason: string }>;
+  } | null>(null);
   const [uploadingImport, setUploadingImport] = useState(false);
   const [blobNotice, setBlobNotice] = useState<string | null>(null);
+
+  // Data Peserta states
+  const [studentsData, setStudentsData] = useState<{
+    items: StudentRecord[];
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+    filterOptions: {
+      kelasList: string[];
+      sesiList: string[];
+      ruangList: string[];
+      statusList: string[];
+    };
+  }>({
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: 25,
+    totalPages: 1,
+    filterOptions: { kelasList: [], sesiList: [], ruangList: [], statusList: ['Aktif'] },
+  });
+  const [studentQuery, setStudentQuery] = useState('');
+  const [studentKelasFilter, setStudentKelasFilter] = useState('');
+  const [studentSesiFilter, setStudentSesiFilter] = useState('');
+  const [studentRuangFilter, setStudentRuangFilter] = useState('');
+  const [studentStatusFilter, setStudentStatusFilter] = useState('');
+  const [studentPage, setStudentPage] = useState(1);
+  const [studentPageSize, setStudentPageSize] = useState(25);
+  const [detailStudent, setDetailStudent] = useState<StudentRecord | null>(null);
+  const [editStudentModal, setEditStudentModal] = useState<{
+    mode: 'create' | 'edit';
+    form: Partial<StudentRecord>;
+  } | null>(null);
+  const [savingStudent, setSavingStudent] = useState(false);
+  const [deleteStudentTarget, setDeleteStudentTarget] = useState<StudentRecord | null>(null);
 
   // 11 Docs Generator states
   const [docCatalog, setDocCatalog] = useState<Array<{ doc_key: string; title: string }>>([]);
@@ -157,6 +324,33 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
   const [verifyModalReport, setVerifyModalReport] = useState<Record<string, unknown> | null>(null);
   const [verifyNote, setVerifyNote] = useState('');
 
+  const buildStudentQueryParams = useCallback(
+    (overrideAll = false) => {
+      const sp = new URLSearchParams();
+      if (studentQuery.trim()) sp.set('q', studentQuery.trim());
+      if (studentKelasFilter) sp.set('kelas', studentKelasFilter);
+      if (studentSesiFilter) sp.set('sesi', studentSesiFilter);
+      if (studentRuangFilter) sp.set('ruang', studentRuangFilter);
+      if (studentStatusFilter) sp.set('status', studentStatusFilter);
+      if (overrideAll) {
+        sp.set('all', '1');
+      } else {
+        sp.set('page', String(studentPage));
+        sp.set('pageSize', String(studentPageSize));
+      }
+      return sp.toString();
+    },
+    [
+      studentQuery,
+      studentKelasFilter,
+      studentSesiFilter,
+      studentRuangFilter,
+      studentStatusFilter,
+      studentPage,
+      studentPageSize,
+    ]
+  );
+
   const loadSectionData = useCallback(async () => {
     try {
       const [mon, notif] = await Promise.all([
@@ -179,8 +373,21 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
         setSupervisors(sups);
       }
       if (section === 'impor') {
-        const b = await apiFetch<Array<Record<string, unknown>>>('/api/admin/import/batches');
+        const [b, cl] = await Promise.all([
+          apiFetch<Array<Record<string, unknown>>>('/api/admin/import/batches'),
+          apiFetch<{ checklist: DocumentChecklistItem[]; overallReady: boolean }>(
+            '/api/admin/import/checklist'
+          ),
+        ]);
         setBatches(b);
+        setChecklist(cl.checklist);
+        setChecklistReady(cl.overallReady);
+      }
+      if (section === 'peserta') {
+        const res = await apiFetch<typeof studentsData>(
+          `/api/admin/students?${buildStudentQueryParams(false)}`
+        );
+        setStudentsData(res);
       }
       if (section === 'dokumen') {
         const [gen, ds] = await Promise.all([
@@ -215,7 +422,7 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [section, auditQuery]);
+  }, [section, auditQuery, buildStudentQueryParams]);
 
   const prevLevel3CountRef = React.useRef<number | null>(null);
 
@@ -278,28 +485,44 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
 
   const unreadNotifs = notifications.filter((n) => n.dibaca === 0).length;
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handleStageUploadProcess = async (stageKey: ImportDocType) => {
+    const file = stageFiles[stageKey];
+    if (!file) {
+      setToast({ message: `Pilih berkas untuk tahap ${DOC_TYPE_LABELS[stageKey]} terlebih dahulu.`, type: 'error' });
+      return;
+    }
+    setProcessingStage(stageKey);
     setUploadingImport(true);
+    setStageError(null);
+    setLastImportResult(null);
     try {
       const form = new FormData();
+      form.append('targetType', stageKey);
       form.append('file', file);
       const batch = await apiFetch<ImportBatchRecord>('/api/admin/import/upload', {
         method: 'POST',
         body: form,
       });
       setActiveBatch(batch);
-      setToast({ message: `Dokumen "${file.name}" berhasil diekstrak ke pratinjau.`, type: 'success' });
+      setPreviewPage(1);
+      setStageFiles((prev) => ({ ...prev, [stageKey]: null }));
+      const rowCount = batch.extracted_rows.length;
+      setToast({
+        message:
+          batch.detected_type === 'dokumen_pendukung'
+            ? `Berkas "${file.name}" diarsipkan untuk konfirmasi.`
+            : `Berkas "${file.name}" terbaca (${rowCount} baris). Silakan periksa pratinjau lalu klik KONFIRMASI SIMPAN.`,
+        type: 'success',
+      });
       await loadSectionData();
     } catch (err) {
-      setToast({
-        message: err instanceof Error ? err.message : 'Gagal mengunggah dan mengekstrak dokumen.',
-        type: 'error',
-      });
+      const msg = err instanceof Error ? err.message : 'Gagal mengunggah dan memproses dokumen.';
+      setStageError({ stageKey, message: msg });
+      setToast({ message: msg, type: 'error' });
+      await loadSectionData();
     } finally {
+      setProcessingStage(null);
       setUploadingImport(false);
-      e.target.value = '';
     }
   };
 
@@ -340,6 +563,8 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
         extracted_rows: Array<Record<string, unknown>>;
         unreadable_fields: ImportBatchRecord['unreadable_fields'];
         duplicates: ImportBatchRecord['duplicates'];
+        row_issues?: ImportBatchRecord['row_issues'];
+        summary?: ImportSummaryReport;
       }>(`/api/admin/import/${activeBatch.id}`, {
         method: 'PUT',
         body: JSON.stringify({
@@ -349,6 +574,7 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
       });
       setActiveBatch({ ...activeBatch, ...updated });
       setToast({ message: 'Koreksi pratinjau disimpan dan validasi ulang selesai.', type: 'success' });
+      await loadSectionData();
     } catch (err) {
       setToast({
         message: err instanceof Error ? err.message : 'Gagal menyimpan koreksi.',
@@ -359,8 +585,9 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
 
   const handleConfirmBatch = async () => {
     if (!activeBatch) return;
+    setConfirmingBatch(true);
     try {
-      const res = await apiFetch<{ inserted: number; updated: number; skipped: number }>(
+      const res = await apiFetch<ImportSummaryReport & { ok: boolean }>(
         `/api/admin/import/${activeBatch.id}/confirm`,
         {
           method: 'POST',
@@ -370,15 +597,104 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
           }),
         }
       );
-      setToast({
-        message: `Konfirmasi simpan berhasil: ${res.inserted} data baru, ${res.updated} diperbarui, ${res.skipped} dilewati.`,
-        type: 'success',
+      setLastImportResult({
+        filename: activeBatch.filename,
+        docType: activeBatch.detected_type,
+        summary: res,
       });
+      const hasIssues = res.failedCount > 0 || res.duplicatesCount > 0;
+      const zeroSaved =
+        activeBatch.detected_type !== 'dokumen_pendukung' &&
+        res.inserted + res.updated + res.unchanged === 0;
+      if (zeroSaved) {
+        setToast({
+          message: `Konfirmasi selesai, namun 0 data tersimpan (${res.failedCount} gagal, ${res.duplicatesCount} duplikat). Periksa detail baris bermasalah.`,
+          type: 'error',
+        });
+      } else {
+        setToast({
+          message: `Impor selesai: ${res.inserted} baru, ${res.updated} diperbarui, ${res.unchanged} tidak berubah${
+            hasIssues ? `, ${res.failedCount} gagal, ${res.duplicatesCount} duplikat` : ''
+          }.`,
+          type: hasIssues ? 'info' : 'success',
+        });
+      }
       setActiveBatch(null);
       await loadSectionData();
     } catch (err) {
       setToast({
         message: err instanceof Error ? err.message : 'Gagal mengonfirmasi penyimpanan.',
+        type: 'error',
+      });
+    } finally {
+      setConfirmingBatch(false);
+    }
+  };
+
+  const handleSaveStudent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editStudentModal) return;
+    setSavingStudent(true);
+    try {
+      if (editStudentModal.mode === 'create') {
+        await apiFetch('/api/admin/students', {
+          method: 'POST',
+          body: JSON.stringify(editStudentModal.form),
+        });
+        setToast({ message: 'Data peserta baru berhasil ditambahkan.', type: 'success' });
+      } else if (editStudentModal.form.id) {
+        await apiFetch(`/api/admin/students/${editStudentModal.form.id}`, {
+          method: 'PUT',
+          body: JSON.stringify(editStudentModal.form),
+        });
+        setToast({ message: 'Data peserta berhasil diperbarui.', type: 'success' });
+      }
+      setEditStudentModal(null);
+      await loadSectionData();
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Gagal menyimpan data peserta.',
+        type: 'error',
+      });
+    } finally {
+      setSavingStudent(false);
+    }
+  };
+
+  const handleDeleteStudent = async () => {
+    if (!deleteStudentTarget) return;
+    try {
+      await apiFetch(`/api/admin/students/${deleteStudentTarget.id}`, {
+        method: 'DELETE',
+      });
+      setToast({
+        message: `Peserta "${deleteStudentTarget.nama}" telah dihapus.`,
+        type: 'success',
+      });
+      setDeleteStudentTarget(null);
+      await loadSectionData();
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Gagal menghapus data peserta.',
+        type: 'error',
+      });
+    }
+  };
+
+  const handleExportStudentsPdf = async () => {
+    try {
+      const res = await apiFetch<{ items: StudentRecord[] }>(
+        `/api/admin/students?${buildStudentQueryParams(true)}`
+      );
+      if (res.items.length === 0) {
+        setToast({ message: 'Tidak ada data peserta untuk diekspor.', type: 'info' });
+        return;
+      }
+      generateStudentsPdf(res.items);
+      setToast({ message: `Ekspor PDF ${res.items.length} data peserta selesai.`, type: 'success' });
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Gagal mengekspor PDF peserta.',
         type: 'error',
       });
     }
@@ -516,6 +832,7 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
   }> = [
     { key: 'monitoring', label: 'Dashboard Monitoring', icon: LayoutDashboard },
     { key: 'impor', label: 'Impor Dokumen SAUM', icon: Upload },
+    { key: 'peserta', label: 'Data Peserta', icon: GraduationCap },
     { key: 'dokumen', label: '11 Dokumen Otomatis', icon: FolderArchive },
     { key: 'jadwal', label: 'Kegiatan & Jadwal', icon: Calendar },
     { key: 'ruang', label: 'Ruang & Denah', icon: Building2 },
@@ -527,12 +844,32 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
 
   const batchKeys =
     activeBatch && activeBatch.extracted_rows.length > 0
-      ? Array.from(
-          new Set(
-            activeBatch.extracted_rows.flatMap((r) => Object.keys(r).filter((k) => !k.startsWith('_')))
-          )
-        )
+      ? (() => {
+          const allKeys = Array.from(
+            new Set(
+              activeBatch.extracted_rows.flatMap((r) => Object.keys(r).filter((k) => !k.startsWith('_')))
+            )
+          );
+          if (
+            activeBatch.detected_type === 'data_peserta' ||
+            activeBatch.target_type === 'data_peserta'
+          ) {
+            const ordered = DNPU_KEY_ORDER.filter((k) => allKeys.includes(k));
+            const extras = allKeys.filter((k) => !DNPU_KEY_ORDER.includes(k));
+            return [...ordered, ...extras];
+          }
+          return allKeys;
+        })()
       : [];
+
+  const PREVIEW_PAGE_SIZE = 30;
+  const previewTotalRows = activeBatch?.extracted_rows.length ?? 0;
+  const previewTotalPages = Math.max(1, Math.ceil(previewTotalRows / PREVIEW_PAGE_SIZE));
+  const safePreviewPage = Math.min(previewPage, previewTotalPages);
+  const previewStartIdx = (safePreviewPage - 1) * PREVIEW_PAGE_SIZE;
+  const previewRowsSlice = activeBatch
+    ? activeBatch.extracted_rows.slice(previewStartIdx, previewStartIdx + PREVIEW_PAGE_SIZE)
+    : [];
 
   // Derived real metrics for charts & search filters
   const q = headerSearch.trim().toLowerCase();
@@ -1233,24 +1570,25 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
                 </div>
               )}
 
-              {/* 2. IMPOR DOKUMEN SAUM (FR-IMP) */}
+              {/* 2. IMPOR DOKUMEN SAUM BERTAHAP & CHECKLIST KELENGKAPAN (FR-IMP) */}
               {section === 'impor' && (
                 <div className="space-y-6">
-                  <div className="bg-white border border-[#E5EAF0] rounded-xl p-6 space-y-5 shadow-card">
+                  {/* Header + Blob notice */}
+                  <div className="bg-white border border-[#E5EAF0] rounded-xl p-5 sm:p-6 space-y-4 shadow-card">
                     <div className="flex flex-wrap items-start justify-between gap-4">
                       <div>
                         <h2 className="font-display text-base font-bold text-[#10243A]">
-                          Unggah Dokumen Ekspor SAUM
+                          Impor Dokumen Ekspor SAUM (Bertahap Per Jenis Dokumen)
                         </h2>
-                        <p className="text-sm text-[#718096] mt-1">
-                          Mendukung XLSX, CSV, PDF teks, PDF scan, dan gambar scan (PNG/JPG). Sel yang tidak terbaca ditandai dan tidak diisi otomatis (BR-08).
+                        <p className="text-xs sm:text-sm text-[#718096] mt-1">
+                          Unggah dan proses satu per satu sesuai jenis dokumen SAUM. Mendukung XLSX, CSV, PDF teks, PDF scan OCR, dan gambar (PNG/JPG). Sel yang tidak terbaca ditandai dan tidak ditebak otomatis.
                         </p>
                       </div>
                       <button
                         type="button"
                         disabled={uploadingImport}
                         onClick={handleLoadSampleSaum}
-                        className="px-4 py-2.5 rounded-xl border border-[#087F5B] bg-[#E8F5EF] hover:bg-[#d3eee1] text-[#087F5B] text-xs font-bold min-h-[42px] transition-colors"
+                        className="px-4 py-2.5 rounded-xl border border-[#087F5B] bg-[#E8F5EF] hover:bg-[#d3eee1] text-[#087F5B] text-xs font-bold min-h-[42px] transition-colors shrink-0"
                       >
                         Muat Paket Sampel SAUM (Siap Uji)
                       </button>
@@ -1262,50 +1600,299 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
                         <span>{blobNotice}</span>
                       </div>
                     )}
+                  </div>
 
-                    <label className="block border-2 border-dashed border-[#E5EAF0] hover:border-[#087F5B] rounded-xl p-8 text-center cursor-pointer transition-colors bg-[#F5F7FA]">
-                      <Upload className="w-7 h-7 text-[#087F5B] mx-auto mb-2" />
-                      <p className="text-sm font-semibold text-[#10243A]">
-                        {uploadingImport
-                          ? 'Sedang mengarsipkan SHA-256 dan mengekstrak dokumen...'
-                          : 'Pilih atau jatuhkan file ekspor SAUM (.xlsx, .csv, .pdf, .png, .jpg)'}
-                      </p>
-                      <p className="text-xs text-[#718096] mt-1">
-                        Ukuran maksimal 20 MB · Arsip sumber bersifat permanen
-                      </p>
-                      <input
-                        type="file"
-                        accept=".xlsx,.xls,.csv,.pdf,image/png,image/jpeg,image/webp"
-                        disabled={uploadingImport}
-                        onChange={handleFileUpload}
-                        className="hidden"
-                      />
-                    </label>
-
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-[#718096] pt-1">
-                      <span className="font-semibold text-[#172B4D]">Unduh Template Ekspor SAUM:</span>
-                      {(
-                        [
-                          ['data_pengawas', 'Data Pengawas'],
-                          ['data_peserta', 'Data Peserta'],
-                          ['denah_peserta', 'Denah Peserta'],
-                          ['jadwal_pengawasan', 'Jadwal Pengawasan'],
-                        ] as const
-                      ).map(([tKey, tLabel]) => (
-                        <button
-                          key={tKey}
-                          type="button"
-                          onClick={() =>
-                            downloadAuthenticatedFile(`/api/admin/import/template/${tKey}`, `Template_SAUM_${tKey}.xlsx`)
-                          }
-                          className="px-3 py-1.5 rounded-lg border border-[#E5EAF0] bg-white hover:bg-[#F5F7FA] text-[#172B4D] font-medium"
-                        >
-                          {tLabel} (.xlsx)
-                        </button>
-                      ))}
+                  {/* Checklist Kelengkapan Dokumen */}
+                  <div className="bg-white border border-[#E5EAF0] rounded-xl overflow-hidden shadow-card">
+                    <div className="p-4 sm:p-5 border-b border-[#E5EAF0] flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h3 className="font-display text-sm font-bold text-[#10243A] flex items-center gap-2">
+                          <FileCheck2 className="w-4 h-4 text-[#087F5B]" />
+                          <span>Checklist Kelengkapan Dokumen SAUM</span>
+                        </h3>
+                        <p className="text-xs text-[#718096] mt-0.5">
+                          Pantau status unggah, jumlah baris terbaca, gagal, dan alasan melewati untuk setiap tahapan dokumen.
+                        </p>
+                      </div>
+                      <StatusBadge tone={checklistReady ? 'emerald' : 'amber'}>
+                        {checklistReady ? 'Semua Dokumen Wajib Lengkap' : 'Ada Dokumen Belum Lengkap'}
+                      </StatusBadge>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-[#F5F7FA] border-b border-[#E5EAF0] text-[#718096]">
+                            <th className="py-3 px-4 font-semibold">Tahap Dokumen</th>
+                            <th className="py-3 px-4 font-semibold">Status</th>
+                            <th className="py-3 px-4 font-semibold">File Terakhir</th>
+                            <th className="py-3 px-4 font-semibold text-right">Terbaca</th>
+                            <th className="py-3 px-4 font-semibold text-right">Gagal / Lewati</th>
+                            <th className="py-3 px-4 font-semibold">Keterangan / Alasan</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#E5EAF0]">
+                          {checklist.map((item) => {
+                            const effectiveStatus: ChecklistDocStatus =
+                              processingStage === item.stageKey ? 'Sedang Diproses' : item.status;
+                            const badgeTone =
+                              effectiveStatus === 'Berhasil Diproses'
+                                ? 'emerald'
+                                : effectiveStatus === 'Berhasil Diunggah'
+                                ? 'navy'
+                                : effectiveStatus === 'Sedang Diproses'
+                                ? 'gold'
+                                : effectiveStatus === 'Perlu Pemeriksaan'
+                                ? 'amber'
+                                : effectiveStatus === 'Gagal Diproses'
+                                ? 'rose'
+                                : 'slate';
+                            return (
+                              <tr key={item.stageKey} className="hover:bg-[#F5F7FA]/60">
+                                <td className="py-3 px-4 font-semibold text-[#10243A]">
+                                  {item.label}{' '}
+                                  {item.required && (
+                                    <span className="text-[10px] font-bold text-[#087F5B]">(Wajib)</span>
+                                  )}
+                                </td>
+                                <td className="py-3 px-4">
+                                  <StatusBadge tone={badgeTone}>{effectiveStatus}</StatusBadge>
+                                </td>
+                                <td className="py-3 px-4 font-mono-tabular text-[#172B4D]">
+                                  {item.filename || '-'}
+                                </td>
+                                <td className="py-3 px-4 text-right font-mono-tabular font-semibold text-[#087F5B]">
+                                  {item.readCount}
+                                </td>
+                                <td className="py-3 px-4 text-right font-mono-tabular text-rose-700">
+                                  {item.failedCount + item.duplicatesCount}
+                                </td>
+                                <td className="py-3 px-4 text-[#718096] max-w-md">
+                                  {item.missingNote ||
+                                    (item.skipReasons.length > 0
+                                      ? item.skipReasons.slice(0, 2).join('; ')
+                                      : item.confirmedAt
+                                      ? `Terkonfirmasi (${item.insertedCount} baru, ${item.updatedCount} perbarui, ${item.unchangedCount} tetap)`
+                                      : '-')}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
                     </div>
                   </div>
 
+                  {/* 5 Tahap Unggah Terpisah */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {IMPORT_STAGES.map((stage) => {
+                      const clItem = checklist.find((c) => c.stageKey === stage.stageKey);
+                      const selectedFile = stageFiles[stage.stageKey] || null;
+                      const isProcessing = processingStage === stage.stageKey;
+                      const stageStatus: ChecklistDocStatus = isProcessing
+                        ? 'Sedang Diproses'
+                        : clItem?.status || 'Belum Diunggah';
+                      const stageTone =
+                        stageStatus === 'Berhasil Diproses'
+                          ? 'emerald'
+                          : stageStatus === 'Berhasil Diunggah'
+                          ? 'navy'
+                          : stageStatus === 'Sedang Diproses'
+                          ? 'gold'
+                          : stageStatus === 'Perlu Pemeriksaan'
+                          ? 'amber'
+                          : stageStatus === 'Gagal Diproses'
+                          ? 'rose'
+                          : 'slate';
+
+                      return (
+                        <div
+                          key={stage.stageKey}
+                          className="bg-white border border-[#E5EAF0] rounded-xl p-5 space-y-3.5 shadow-card flex flex-col justify-between"
+                        >
+                          <div className="space-y-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-center gap-2.5">
+                                <span className="w-7 h-7 rounded-lg bg-[#10243A] text-white text-xs font-mono-tabular font-bold flex items-center justify-center shrink-0">
+                                  {stage.stepNo}
+                                </span>
+                                <h3 className="font-display text-sm font-bold text-[#10243A]">
+                                  {stage.title}
+                                </h3>
+                              </div>
+                              <StatusBadge tone={stageTone}>{stageStatus}</StatusBadge>
+                            </div>
+                            <p className="text-xs text-[#718096] leading-relaxed">{stage.subtitle}</p>
+                          </div>
+
+                          <div className="space-y-2.5 pt-1">
+                            <label className="block border border-dashed border-[#CBD5E1] hover:border-[#087F5B] rounded-xl px-3.5 py-3 bg-[#F5F7FA] cursor-pointer transition-colors">
+                              <span className="text-xs font-semibold text-[#172B4D] block truncate">
+                                {selectedFile
+                                  ? `File dipilih: ${selectedFile.name}`
+                                  : 'Pilih file (.xlsx, .csv, .pdf, .png, .jpg)'}
+                              </span>
+                              <input
+                                type="file"
+                                accept=".xlsx,.xls,.csv,.pdf,image/png,image/jpeg,image/webp"
+                                disabled={uploadingImport}
+                                onChange={(e) => {
+                                  const f = e.target.files?.[0] || null;
+                                  setStageFiles((prev) => ({ ...prev, [stage.stageKey]: f }));
+                                  e.target.value = '';
+                                }}
+                                className="hidden"
+                              />
+                            </label>
+
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              {stage.hasTemplate ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    downloadAuthenticatedFile(
+                                      `/api/admin/import/template/${stage.stageKey}`,
+                                      `Template_SAUM_${stage.stageKey}.xlsx`
+                                    )
+                                  }
+                                  className="px-3 py-2 rounded-lg border border-[#E5EAF0] bg-white hover:bg-[#F5F7FA] text-[11px] font-semibold text-[#172B4D] inline-flex items-center gap-1.5 min-h-[38px]"
+                                >
+                                  <Download className="w-3.5 h-3.5 text-[#087F5B]" />
+                                  Unduh Template (.xlsx)
+                                </button>
+                              ) : (
+                                <span className="text-[11px] text-[#718096]">Arsip dokumen pendukung</span>
+                              )}
+
+                              <button
+                                type="button"
+                                disabled={!selectedFile || uploadingImport}
+                                onClick={() => handleStageUploadProcess(stage.stageKey)}
+                                className="px-4 py-2 rounded-xl bg-[#087F5B] hover:bg-[#06694b] disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1.5 min-h-[38px]"
+                              >
+                                <Upload className="w-3.5 h-3.5" />
+                                {isProcessing ? 'Sedang Diproses...' : 'Unggah & Proses'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Error detail panel when extraction fails */}
+                  {stageError && (
+                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-5 space-y-2 text-xs text-rose-900">
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="font-bold text-sm">
+                          Proses Gagal ({DOC_TYPE_LABELS[stageError.stageKey]}): {stageError.message}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setStageError(null)}
+                          className="text-rose-700 hover:text-rose-950 p-1"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <p className="text-rose-800">
+                        Dokumen tetap tercatat pada riwayat dengan status Gagal Diproses. Periksa format file, kejelasan scan, atau template kolom sebelum mengunggah ulang.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Laporan Hasil Impor Terakhir */}
+                  {lastImportResult && (
+                    <div className="bg-white border border-[#B7E4D0] rounded-xl p-5 sm:p-6 space-y-4 shadow-card">
+                      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E5EAF0] pb-3">
+                        <div>
+                          <h3 className="font-display text-base font-bold text-[#10243A]">
+                            Laporan Hasil Impor: {lastImportResult.filename}
+                          </h3>
+                          <p className="text-xs text-[#718096] mt-0.5">
+                            Jenis Dokumen: {DOC_TYPE_LABELS[lastImportResult.docType]}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {lastImportResult.summary.failureReasons.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setIssuesModalReport({
+                                  title: `Detail Baris Bermasalah — ${lastImportResult.filename}`,
+                                  reasons: lastImportResult.summary.failureReasons,
+                                })
+                              }
+                              className="px-3.5 py-2 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-800 text-xs font-semibold"
+                            >
+                              Lihat Detail Baris Bermasalah ({lastImportResult.summary.failureReasons.length})
+                            </button>
+                          )}
+                          {lastImportResult.docType === 'data_peserta' && (
+                            <button
+                              type="button"
+                              onClick={() => setSection('peserta')}
+                              className="px-3.5 py-2 rounded-xl bg-[#10243A] text-white text-xs font-semibold"
+                            >
+                              Buka Menu Data Peserta
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+                        <div className="p-3 rounded-xl bg-[#F5F7FA] border border-[#E5EAF0]">
+                          <p className="text-[11px] text-[#718096]">Total Baris File</p>
+                          <p className="text-lg font-mono-tabular font-bold text-[#10243A]">
+                            {lastImportResult.summary.totalRows}
+                          </p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-[#E8F5EF] border border-[#B7E4D0]">
+                          <p className="text-[11px] text-[#087F5B]">Berhasil Dibaca</p>
+                          <p className="text-lg font-mono-tabular font-bold text-[#087F5B]">
+                            {lastImportResult.summary.parsedCount}
+                          </p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-[#E8F5EF] border border-[#B7E4D0]">
+                          <p className="text-[11px] text-[#087F5B]">Data Baru</p>
+                          <p className="text-lg font-mono-tabular font-bold text-[#087F5B]">
+                            {lastImportResult.summary.inserted}
+                          </p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-[#10243A]/5 border border-[#10243A]/15">
+                          <p className="text-[11px] text-[#10243A]">Diperbarui</p>
+                          <p className="text-lg font-mono-tabular font-bold text-[#10243A]">
+                            {lastImportResult.summary.updated}
+                          </p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-[#F5F7FA] border border-[#E5EAF0]">
+                          <p className="text-[11px] text-[#718096]">Tidak Berubah</p>
+                          <p className="text-lg font-mono-tabular font-bold text-[#172B4D]">
+                            {lastImportResult.summary.unchanged}
+                          </p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200">
+                          <p className="text-[11px] text-amber-800">Duplikat</p>
+                          <p className="text-lg font-mono-tabular font-bold text-amber-900">
+                            {lastImportResult.summary.duplicatesCount}
+                          </p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-rose-50 border border-rose-200">
+                          <p className="text-[11px] text-rose-800">Gagal Validasi</p>
+                          <p className="text-lg font-mono-tabular font-bold text-rose-900">
+                            {lastImportResult.summary.failedCount}
+                          </p>
+                        </div>
+                      </div>
+
+                      {lastImportResult.summary.archiveOnlyNote && (
+                        <p className="text-xs text-[#718096] bg-[#F5F7FA] p-3 rounded-lg border border-[#E5EAF0]">
+                          {lastImportResult.summary.archiveOnlyNote}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Pratinjau & Validasi Sebelum KONFIRMASI SIMPAN */}
                   {activeBatch && (
                     <div className="bg-white border border-[#E5EAF0] rounded-xl p-6 space-y-5 shadow-card">
                       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#E5EAF0] pb-4">
@@ -1314,7 +1901,8 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
                             Pratinjau & Validasi: {activeBatch.filename}
                           </h3>
                           <p className="text-xs text-[#718096] font-mono-tabular mt-0.5">
-                            SHA-256: {activeBatch.sha256.slice(0, 20)}... · Keyakinan Klasifikasi:{' '}
+                            SHA-256: {activeBatch.sha256.slice(0, 20)}... · Total Baris:{' '}
+                            {activeBatch.extracted_rows.length} · Keyakinan Klasifikasi:{' '}
                             {Math.round(activeBatch.confidence * 100)}%
                           </p>
                         </div>
@@ -1336,6 +1924,79 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
                         </div>
                       </div>
 
+                      {activeBatch.file_duplicate_warning && (
+                        <div className="p-3.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                          <span className="font-semibold">Info Berkas Duplikat: </span>
+                          {activeBatch.file_duplicate_warning}
+                        </div>
+                      )}
+
+                      {activeBatch.summary && (
+                        <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5 text-xs">
+                          <div className="p-2.5 rounded-lg bg-[#F5F7FA] border border-[#E5EAF0]">
+                            <span className="text-[#718096] block">Total Baris</span>
+                            <strong className="font-mono-tabular text-[#10243A] text-sm">
+                              {activeBatch.summary.totalRows}
+                            </strong>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-[#E8F5EF] border border-[#B7E4D0]">
+                            <span className="text-[#087F5B] block">Est. Data Baru</span>
+                            <strong className="font-mono-tabular text-[#087F5B] text-sm">
+                              {activeBatch.summary.inserted}
+                            </strong>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-[#10243A]/5 border border-[#10243A]/15">
+                            <span className="text-[#10243A] block">Est. Diperbarui</span>
+                            <strong className="font-mono-tabular text-[#10243A] text-sm">
+                              {activeBatch.summary.updated}
+                            </strong>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-[#F5F7FA] border border-[#E5EAF0]">
+                            <span className="text-[#718096] block">Tidak Berubah</span>
+                            <strong className="font-mono-tabular text-[#172B4D] text-sm">
+                              {activeBatch.summary.unchanged}
+                            </strong>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200">
+                            <span className="text-amber-800 block">Duplikat Internal</span>
+                            <strong className="font-mono-tabular text-amber-900 text-sm">
+                              {activeBatch.summary.duplicatesCount}
+                            </strong>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200">
+                            <span className="text-rose-800 block">Gagal Validasi</span>
+                            <strong className="font-mono-tabular text-rose-900 text-sm">
+                              {activeBatch.summary.failedCount}
+                            </strong>
+                          </div>
+                        </div>
+                      )}
+
+                      {activeBatch.page_logs && activeBatch.page_logs.length > 0 && (
+                        <div className="p-3.5 rounded-lg bg-[#F5F7FA] border border-[#E5EAF0] text-xs space-y-1.5">
+                          <p className="font-semibold text-[#10243A]">
+                            Log Pembacaan Halaman PDF / Gambar ({activeBatch.page_logs.length} halaman):
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {activeBatch.page_logs.map((pl) => (
+                              <div
+                                key={pl.pageNumber}
+                                className={`p-2 rounded-lg border text-[11px] ${
+                                  pl.status === 'failed'
+                                    ? 'bg-rose-50 border-rose-200 text-rose-900'
+                                    : pl.status === 'unmapped'
+                                    ? 'bg-amber-50 border-amber-200 text-amber-900'
+                                    : 'bg-white border-[#E5EAF0] text-[#172B4D]'
+                                }`}
+                              >
+                                <span className="font-bold">Halaman {pl.pageNumber}</span> ({pl.method}) ·{' '}
+                                {pl.rowCount} baris — {pl.message}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       {activeBatch.confidence < 0.75 && (
                         <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
                           Klasifikasi otomatis belum sepenuhnya yakin. Pastikan jenis dokumen di kanan atas sudah sesuai sebelum konfirmasi (FR-IMP-03).
@@ -1344,13 +2005,28 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
 
                       {activeBatch.unreadable_fields.length > 0 && (
                         <div className="p-3.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-950 space-y-1">
-                          <p className="font-semibold">
-                            Ditemukan {activeBatch.unreadable_fields.length} sel kosong / tidak terbaca (BR-08 — tidak ditebak otomatis):
-                          </p>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-semibold">
+                              Ditemukan {activeBatch.unreadable_fields.length} sel kosong / tidak terbaca (BR-08 — tidak ditebak otomatis):
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setIssuesModalReport({
+                                  title: `Detail Field Tidak Terbaca — ${activeBatch.filename}`,
+                                  reasons: activeBatch.unreadable_fields,
+                                })
+                              }
+                              className="text-amber-900 underline font-semibold"
+                            >
+                              Lihat Semua
+                            </button>
+                          </div>
                           <ul className="list-disc pl-4 space-y-0.5">
-                            {activeBatch.unreadable_fields.slice(0, 8).map((u, i) => (
+                            {activeBatch.unreadable_fields.slice(0, 6).map((u, i) => (
                               <li key={i}>
-                                Baris {u.rowIndex + 1} · Kolom <code>{u.field}</code>: {u.reason}
+                                {u.rowIndex >= 0 ? `Baris ${u.rowIndex + 1} · ` : ''}
+                                Kolom <code>{FIELD_LABELS[u.field] || u.field}</code>: {u.reason}
                               </li>
                             ))}
                           </ul>
@@ -1359,59 +2035,103 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
 
                       {activeBatch.duplicates.length > 0 && (
                         <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-900 space-y-1">
-                          <p className="font-semibold">Deteksi Duplikasi ({activeBatch.duplicates.length}):</p>
+                          <p className="font-semibold">Deteksi Duplikasi / Pembaruan ({activeBatch.duplicates.length}):</p>
                           <ul className="list-disc pl-4 space-y-0.5">
-                            {activeBatch.duplicates.slice(0, 8).map((d, i) => (
+                            {activeBatch.duplicates.slice(0, 6).map((d, i) => (
                               <li key={i}>
-                                Baris {d.rowIndex + 1} · {d.field} = {d.value} ({d.source})
+                                Baris {d.rowIndex + 1} · {FIELD_LABELS[d.field] || d.field} = {d.value} ({d.source})
                               </li>
                             ))}
                           </ul>
                         </div>
                       )}
 
-                      <div className="overflow-x-auto border border-[#E5EAF0] rounded-lg max-h-96">
-                        <table className="w-full text-left border-collapse text-xs">
-                          <thead className="bg-[#F5F7FA] sticky top-0">
-                            <tr>
-                              <th className="py-2.5 px-3 border-b border-[#E5EAF0] font-mono-tabular">#</th>
-                              {batchKeys.map((k) => (
-                                <th key={k} className="py-2.5 px-3 border-b border-[#E5EAF0] font-semibold">
-                                  {k}
-                                </th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-[#E5EAF0]">
-                            {activeBatch.extracted_rows.map((row, rIdx) => (
-                              <tr key={rIdx}>
-                                <td className="py-1.5 px-3 font-mono-tabular text-[#718096]">{rIdx + 1}</td>
-                                {batchKeys.map((k) => {
-                                  const val = row[k];
-                                  const isMissing = activeBatch.unreadable_fields.some(
-                                    (u) => u.rowIndex === rIdx && (u.field === k || u.field === '*')
-                                  );
+                      {activeBatch.extracted_rows.length === 0 ? (
+                        <div className="p-4 rounded-xl bg-[#F5F7FA] border border-[#E5EAF0] text-xs text-[#718096]">
+                          {activeBatch.detected_type === 'dokumen_pendukung'
+                            ? 'Dokumen pendukung tersimpan sebagai arsip sumber. Klik KONFIRMASI SIMPAN untuk mencatat status selesai pada checklist.'
+                            : 'Tidak ada baris terstruktur yang terbaca.'}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="overflow-x-auto border border-[#E5EAF0] rounded-lg max-h-[420px]">
+                            <table className="w-full text-left border-collapse text-xs">
+                              <thead className="bg-[#F5F7FA] sticky top-0 z-10">
+                                <tr>
+                                  <th className="py-2.5 px-3 border-b border-[#E5EAF0] font-mono-tabular">#</th>
+                                  {batchKeys.map((k) => (
+                                    <th key={k} className="py-2.5 px-3 border-b border-[#E5EAF0] font-semibold whitespace-nowrap">
+                                      {FIELD_LABELS[k] || k}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-[#E5EAF0]">
+                                {previewRowsSlice.map((row, localIdx) => {
+                                  const rIdx = previewStartIdx + localIdx;
                                   return (
-                                    <td key={k} className="p-1">
-                                      <input
-                                        type="text"
-                                        value={val === null || val === undefined ? '' : String(val)}
-                                        placeholder="(kosong)"
-                                        onChange={(e) => handlePreviewCellEdit(rIdx, k, e.target.value)}
-                                        className={`w-full min-w-[110px] px-2 py-1.5 rounded border text-xs ${
-                                          isMissing
-                                            ? 'border-amber-400 bg-amber-50'
-                                            : 'border-[#E5EAF0] bg-white'
-                                        }`}
-                                      />
-                                    </td>
+                                    <tr key={rIdx}>
+                                      <td className="py-1.5 px-3 font-mono-tabular text-[#718096]">{rIdx + 1}</td>
+                                      {batchKeys.map((k) => {
+                                        const val = row[k];
+                                        const isMissing = activeBatch.unreadable_fields.some(
+                                          (u) => u.rowIndex === rIdx && (u.field === k || u.field === '*')
+                                        );
+                                        return (
+                                          <td key={k} className="p-1">
+                                            <input
+                                              type="text"
+                                              value={val === null || val === undefined ? '' : String(val)}
+                                              placeholder="(kosong)"
+                                              onChange={(e) => handlePreviewCellEdit(rIdx, k, e.target.value)}
+                                              className={`w-full min-w-[105px] px-2 py-1.5 rounded border text-xs ${
+                                                isMissing
+                                                  ? 'border-amber-400 bg-amber-50'
+                                                  : 'border-[#E5EAF0] bg-white'
+                                              }`}
+                                            />
+                                          </td>
+                                        );
+                                      })}
+                                    </tr>
                                   );
                                 })}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                              </tbody>
+                            </table>
+                          </div>
+
+                          {previewTotalPages > 1 && (
+                            <div className="flex items-center justify-between text-xs text-[#718096]">
+                              <span>
+                                Menampilkan baris {previewStartIdx + 1}–
+                                {Math.min(previewStartIdx + PREVIEW_PAGE_SIZE, previewTotalRows)} dari{' '}
+                                {previewTotalRows} baris
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={safePreviewPage <= 1}
+                                  onClick={() => setPreviewPage((p) => Math.max(1, p - 1))}
+                                  className="px-2.5 py-1.5 rounded-lg border border-[#E5EAF0] bg-white disabled:opacity-50"
+                                >
+                                  Sebelumnya
+                                </button>
+                                <span className="font-mono-tabular px-2">
+                                  Hal. {safePreviewPage} / {previewTotalPages}
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={safePreviewPage >= previewTotalPages}
+                                  onClick={() => setPreviewPage((p) => Math.min(previewTotalPages, p + 1))}
+                                  className="px-2.5 py-1.5 rounded-lg border border-[#E5EAF0] bg-white disabled:opacity-50"
+                                >
+                                  Berikutnya
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
 
                       <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
                         <button
@@ -1423,15 +2143,17 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
                         </button>
                         <button
                           type="button"
+                          disabled={confirmingBatch}
                           onClick={handleConfirmBatch}
-                          className="px-5 py-2.5 rounded-xl bg-[#087F5B] hover:bg-[#06694b] text-white text-xs sm:text-sm font-semibold min-h-[44px]"
+                          className="px-5 py-2.5 rounded-xl bg-[#087F5B] hover:bg-[#06694b] disabled:opacity-60 text-white text-xs sm:text-sm font-semibold min-h-[44px]"
                         >
-                          KONFIRMASI SIMPAN
+                          {confirmingBatch ? 'Menyimpan...' : 'KONFIRMASI SIMPAN'}
                         </button>
                       </div>
                     </div>
                   )}
 
+                  {/* Riwayat Arsip Impor */}
                   <div className="bg-white border border-[#E5EAF0] rounded-xl overflow-hidden shadow-card">
                     <div className="p-4 sm:p-5 border-b border-[#E5EAF0]">
                       <h3 className="font-display text-sm font-bold text-[#10243A]">Riwayat Arsip Impor Dokumen</h3>
@@ -1444,46 +2166,399 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
                           <thead>
                             <tr className="bg-[#F5F7FA] border-b border-[#E5EAF0] text-[#718096]">
                               <th className="py-3 px-4 font-semibold">Berkas</th>
-                              <th className="py-3 px-4 font-semibold">Jenis Terdeteksi</th>
+                              <th className="py-3 px-4 font-semibold">Tahap / Jenis</th>
+                              <th className="py-3 px-4 font-semibold">Ringkasan</th>
                               <th className="py-3 px-4 font-semibold">SHA-256</th>
                               <th className="py-3 px-4 font-semibold">Status</th>
                               <th className="py-3 px-4 font-semibold text-right">Aksi</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-[#E5EAF0]">
-                            {batches.map((b) => (
-                              <tr key={String(b.id)} className="hover:bg-[#F5F7FA]/60">
-                                <td className="py-3 px-4 font-semibold text-[#172B4D]">{String(b.filename)}</td>
-                                <td className="py-3 px-4">
-                                  {DOC_TYPE_LABELS[b.detected_type as ImportDocType] || String(b.detected_type)}
-                                </td>
-                                <td className="py-3 px-4 font-mono-tabular text-[#718096]">
-                                  {String(b.sha256).slice(0, 14)}...
-                                </td>
-                                <td className="py-3 px-4">
-                                  <StatusBadge tone={b.status === 'confirmed' ? 'emerald' : 'gold'}>
-                                    {b.status === 'confirmed' ? 'Terkonfirmasi' : String(b.status)}
-                                  </StatusBadge>
-                                </td>
-                                <td className="py-3 px-4 text-right">
-                                  {b.status === 'preview' && (
-                                    <button
-                                      type="button"
-                                      onClick={async () => {
-                                        const full = await apiFetch<ImportBatchRecord>(`/api/admin/import/${b.id}`);
-                                        setActiveBatch(full);
-                                      }}
-                                      className="text-[#087F5B] font-semibold hover:underline"
+                            {batches.map((b) => {
+                              const sum = b.summary as ImportSummaryReport | null | undefined;
+                              return (
+                                <tr key={String(b.id)} className="hover:bg-[#F5F7FA]/60">
+                                  <td className="py-3 px-4 font-semibold text-[#172B4D]">{String(b.filename)}</td>
+                                  <td className="py-3 px-4">
+                                    {DOC_TYPE_LABELS[(b.target_type || b.detected_type) as ImportDocType] ||
+                                      String(b.detected_type)}
+                                  </td>
+                                  <td className="py-3 px-4 font-mono-tabular text-[#718096]">
+                                    {sum
+                                      ? `${sum.totalRows} baris · +${sum.inserted} / ~${sum.updated} / =${sum.unchanged}`
+                                      : '-'}
+                                  </td>
+                                  <td className="py-3 px-4 font-mono-tabular text-[#718096]">
+                                    {String(b.sha256).slice(0, 14)}...
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <StatusBadge
+                                      tone={
+                                        b.status === 'confirmed'
+                                          ? 'emerald'
+                                          : b.status === 'failed'
+                                          ? 'rose'
+                                          : 'amber'
+                                      }
                                     >
-                                      Lanjutkan Pratinjau
-                                    </button>
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
+                                      {b.status === 'confirmed'
+                                        ? 'Terkonfirmasi'
+                                        : b.status === 'failed'
+                                        ? 'Gagal Diproses'
+                                        : 'Pratinjau'}
+                                    </StatusBadge>
+                                  </td>
+                                  <td className="py-3 px-4 text-right space-x-3">
+                                    {b.status === 'preview' && (
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          const full = await apiFetch<ImportBatchRecord>(`/api/admin/import/${b.id}`);
+                                          setActiveBatch(full);
+                                          setPreviewPage(1);
+                                        }}
+                                        className="text-[#087F5B] font-semibold hover:underline"
+                                      >
+                                        Lanjutkan Pratinjau
+                                      </button>
+                                    )}
+                                    {sum && sum.failureReasons && sum.failureReasons.length > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setIssuesModalReport({
+                                            title: `Detail Baris Bermasalah — ${String(b.filename)}`,
+                                            reasons: sum.failureReasons,
+                                          })
+                                        }
+                                        className="text-rose-700 font-semibold hover:underline"
+                                      >
+                                        Detail Masalah ({sum.failureReasons.length})
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 2B. DATA PESERTA (DNPU INTERNAL SIPENGUJI) */}
+              {section === 'peserta' && (
+                <div className="space-y-5">
+                  {/* Header & Action Bar */}
+                  <div className="bg-white border border-[#E5EAF0] rounded-xl p-5 flex flex-wrap items-center justify-between gap-4 shadow-card">
+                    <div>
+                      <h2 className="font-display text-base font-bold text-[#10243A]">
+                        Data Peserta Ujian (DNPU Terimpor)
+                      </h2>
+                      <p className="text-xs sm:text-sm text-[#718096] mt-0.5">
+                        Menampilkan data peserta yang tersimpan di database internal SIPENGUJI dari hasil impor DNPU SAUM. Total:{' '}
+                        <strong className="font-mono-tabular text-[#10243A]">{studentsData.total}</strong> peserta.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSection('impor')}
+                        className="px-3.5 py-2 rounded-xl border border-[#087F5B] bg-[#E8F5EF] hover:bg-[#d3eee1] text-[#087F5B] text-xs font-semibold inline-flex items-center gap-1.5 min-h-[40px]"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        Impor / Perbarui DNPU
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditStudentModal({
+                            mode: 'create',
+                            form: { status: 'Aktif', jk: 'L' },
+                          })
+                        }
+                        className="px-3.5 py-2 rounded-xl bg-[#087F5B] hover:bg-[#06694b] text-white text-xs font-semibold inline-flex items-center gap-1.5 min-h-[40px]"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        Tambah Peserta
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          downloadAuthenticatedFile(
+                            `/api/admin/students/export/xlsx?${buildStudentQueryParams(true)}`,
+                            'Data_Peserta_SIPENGUJI.xlsx'
+                          )
+                        }
+                        className="px-3.5 py-2 rounded-xl border border-[#E5EAF0] bg-white hover:bg-[#F5F7FA] text-[#172B4D] text-xs font-semibold inline-flex items-center gap-1.5 min-h-[40px]"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-[#087F5B]" />
+                        Ekspor Excel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportStudentsPdf}
+                        className="px-3.5 py-2 rounded-xl border border-[#E5EAF0] bg-white hover:bg-[#F5F7FA] text-[#172B4D] text-xs font-semibold inline-flex items-center gap-1.5 min-h-[40px]"
+                      >
+                        <FileText className="w-3.5 h-3.5 text-[#10243A]" />
+                        Ekspor PDF
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Search & Filter Controls */}
+                  <div className="bg-white border border-[#E5EAF0] rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 shadow-card">
+                    <div className="sm:col-span-2 relative">
+                      <Search className="w-4 h-4 text-[#718096] absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={studentQuery}
+                        onChange={(e) => {
+                          setStudentQuery(e.target.value);
+                          setStudentPage(1);
+                        }}
+                        placeholder="Cari nama, NISN, NIS, atau nomor peserta..."
+                        className="w-full pl-9 pr-3 py-2 rounded-xl border border-[#E5EAF0] bg-[#F5F7FA] focus:bg-white text-xs min-h-[40px]"
+                      />
+                    </div>
+                    <select
+                      value={studentKelasFilter}
+                      onChange={(e) => {
+                        setStudentKelasFilter(e.target.value);
+                        setStudentPage(1);
+                      }}
+                      className="px-3 py-2 rounded-xl border border-[#E5EAF0] bg-white text-xs min-h-[40px]"
+                    >
+                      <option value="">Semua Kelas</option>
+                      {studentsData.filterOptions.kelasList.map((k) => (
+                        <option key={k} value={k}>
+                          Kelas: {k}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={studentSesiFilter}
+                      onChange={(e) => {
+                        setStudentSesiFilter(e.target.value);
+                        setStudentPage(1);
+                      }}
+                      className="px-3 py-2 rounded-xl border border-[#E5EAF0] bg-white text-xs min-h-[40px]"
+                    >
+                      <option value="">Semua Sesi</option>
+                      {studentsData.filterOptions.sesiList.map((s) => (
+                        <option key={s} value={s}>
+                          Sesi: {s}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={studentRuangFilter}
+                      onChange={(e) => {
+                        setStudentRuangFilter(e.target.value);
+                        setStudentPage(1);
+                      }}
+                      className="px-3 py-2 rounded-xl border border-[#E5EAF0] bg-white text-xs min-h-[40px]"
+                    >
+                      <option value="">Semua Ruang</option>
+                      {studentsData.filterOptions.ruangList.map((r) => (
+                        <option key={r} value={r}>
+                          Ruang: {r}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={studentStatusFilter}
+                        onChange={(e) => {
+                          setStudentStatusFilter(e.target.value);
+                          setStudentPage(1);
+                        }}
+                        className="flex-1 px-3 py-2 rounded-xl border border-[#E5EAF0] bg-white text-xs min-h-[40px]"
+                      >
+                        <option value="">Semua Status</option>
+                        {studentsData.filterOptions.statusList.map((st) => (
+                          <option key={st} value={st}>
+                            {st}
+                          </option>
+                        ))}
+                      </select>
+                      {(studentQuery ||
+                        studentKelasFilter ||
+                        studentSesiFilter ||
+                        studentRuangFilter ||
+                        studentStatusFilter) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setStudentQuery('');
+                            setStudentKelasFilter('');
+                            setStudentSesiFilter('');
+                            setStudentRuangFilter('');
+                            setStudentStatusFilter('');
+                            setStudentPage(1);
+                          }}
+                          title="Reset filter"
+                          className="px-2.5 py-2 rounded-xl border border-[#E5EAF0] text-xs text-[#718096] hover:text-[#172B4D] min-h-[40px]"
+                        >
+                          <Filter className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Table */}
+                  <div className="bg-white border border-[#E5EAF0] rounded-xl overflow-hidden shadow-card">
+                    {studentsData.items.length === 0 ? (
+                      <EmptyState
+                        icon={<GraduationCap className="w-6 h-6" />}
+                        title="Belum Ada Data Peserta"
+                        description="Silakan unggah dokumen Data Peserta / DNPU melalui menu Impor Dokumen SAUM atau tambah peserta secara manual."
+                        action={
+                          <button
+                            type="button"
+                            onClick={() => setSection('impor')}
+                            className="px-4 py-2.5 rounded-xl bg-[#087F5B] text-white text-xs font-semibold"
+                          >
+                            Buka Impor Dokumen SAUM
+                          </button>
+                        }
+                      />
+                    ) : (
+                      <>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="bg-[#F5F7FA] border-b border-[#E5EAF0] text-[#718096]">
+                                <th className="py-3 px-3 font-semibold">No</th>
+                                <th className="py-3 px-3 font-semibold">NISN / NIS</th>
+                                <th className="py-3 px-3 font-semibold">Nama Lengkap</th>
+                                <th className="py-3 px-3 font-semibold">JK</th>
+                                <th className="py-3 px-3 font-semibold">Kelas</th>
+                                <th className="py-3 px-3 font-semibold">Nomor Peserta</th>
+                                <th className="py-3 px-3 font-semibold">User Ujian</th>
+                                <th className="py-3 px-3 font-semibold">Sesi / Ruang / Meja</th>
+                                <th className="py-3 px-3 font-semibold">Status</th>
+                                <th className="py-3 px-3 font-semibold text-right">Aksi</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-[#E5EAF0]">
+                              {studentsData.items.map((st, idx) => (
+                                <tr key={st.id} className="hover:bg-[#F5F7FA]/60">
+                                  <td className="py-2.5 px-3 font-mono-tabular text-[#718096]">
+                                    {st.no_urut || (studentsData.page - 1) * studentsData.pageSize + idx + 1}
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono-tabular">
+                                    <div className="text-[#172B4D] font-medium">{st.nisn || '-'}</div>
+                                    <div className="text-[11px] text-[#718096]">NIS: {st.nis || '-'}</div>
+                                  </td>
+                                  <td className="py-2.5 px-3 font-semibold text-[#10243A]">{st.nama}</td>
+                                  <td className="py-2.5 px-3 font-mono-tabular">{st.jk || '-'}</td>
+                                  <td className="py-2.5 px-3">{st.kelas}</td>
+                                  <td className="py-2.5 px-3 font-mono-tabular font-semibold text-[#10243A]">
+                                    {st.nomor_peserta}
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono-tabular text-[#718096]">
+                                    {st.user_ujian || '-'}
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono-tabular text-[#172B4D]">
+                                    {[st.sesi || '-', st.ruang || '-', st.meja || '-'].join(' · ')}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <StatusBadge
+                                      tone={
+                                        (st.status || 'Aktif').toLowerCase().includes('non')
+                                          ? 'rose'
+                                          : 'emerald'
+                                      }
+                                    >
+                                      {st.status || 'Aktif'}
+                                    </StatusBadge>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right whitespace-nowrap space-x-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setDetailStudent(st)}
+                                      className="p-1.5 rounded-lg border border-[#E5EAF0] hover:bg-[#F5F7FA] text-[#10243A]"
+                                      title="Detail Peserta"
+                                    >
+                                      <Eye className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setEditStudentModal({
+                                          mode: 'edit',
+                                          form: { ...st },
+                                        })
+                                      }
+                                      className="p-1.5 rounded-lg border border-[#E5EAF0] hover:bg-[#F5F7FA] text-[#087F5B]"
+                                      title="Edit Peserta"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeleteStudentTarget(st)}
+                                      className="p-1.5 rounded-lg border border-rose-200 hover:bg-rose-50 text-rose-700"
+                                      title="Hapus Peserta"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        <div className="p-4 border-t border-[#E5EAF0] flex flex-wrap items-center justify-between gap-3 text-xs text-[#718096]">
+                          <div className="flex items-center gap-2">
+                            <span>
+                              Menampilkan {studentsData.items.length} dari {studentsData.total} peserta
+                            </span>
+                            <select
+                              value={studentPageSize}
+                              onChange={(e) => {
+                                setStudentPageSize(Number(e.target.value));
+                                setStudentPage(1);
+                              }}
+                              className="px-2 py-1 rounded-lg border border-[#E5EAF0] bg-white text-xs"
+                            >
+                              <option value={25}>25 / halaman</option>
+                              <option value={50}>50 / halaman</option>
+                              <option value={100}>100 / halaman</option>
+                              <option value={200}>200 / halaman</option>
+                            </select>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={studentPage <= 1}
+                              onClick={() => setStudentPage((p) => Math.max(1, p - 1))}
+                              className="px-3 py-1.5 rounded-lg border border-[#E5EAF0] bg-white disabled:opacity-50 inline-flex items-center gap-1"
+                            >
+                              <ChevronLeft className="w-3.5 h-3.5" />
+                              Prev
+                            </button>
+                            <span className="px-2 font-mono-tabular font-semibold text-[#172B4D]">
+                              {studentsData.page} / {studentsData.totalPages}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={studentPage >= studentsData.totalPages}
+                              onClick={() =>
+                                setStudentPage((p) => Math.min(studentsData.totalPages, p + 1))
+                              }
+                              className="px-3 py-1.5 rounded-lg border border-[#E5EAF0] bg-white disabled:opacity-50 inline-flex items-center gap-1"
+                            >
+                              Next
+                              <ChevronRight className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </>
                     )}
                   </div>
                 </div>
@@ -2310,6 +3385,230 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Detail Baris Bermasalah Modal */}
+      {issuesModalReport && (
+        <div className="fixed inset-0 z-50 bg-[#10243A]/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-[#E5EAF0] max-w-2xl w-full p-6 space-y-4 shadow-elevated max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-[#E5EAF0] pb-3">
+              <h3 className="font-display text-base font-bold text-[#10243A]">
+                {issuesModalReport.title}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIssuesModalReport(null)}
+                className="text-[#718096] hover:text-[#172B4D] p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 border border-[#E5EAF0] rounded-xl">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="bg-[#F5F7FA] sticky top-0">
+                  <tr>
+                    <th className="py-2.5 px-3 border-b border-[#E5EAF0] font-semibold">Baris / Hal</th>
+                    <th className="py-2.5 px-3 border-b border-[#E5EAF0] font-semibold">Kolom</th>
+                    <th className="py-2.5 px-3 border-b border-[#E5EAF0] font-semibold">Nilai</th>
+                    <th className="py-2.5 px-3 border-b border-[#E5EAF0] font-semibold">Alasan</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E5EAF0]">
+                  {issuesModalReport.reasons.map((item, idx) => (
+                    <tr key={idx}>
+                      <td className="py-2 px-3 font-mono-tabular">
+                        {item.rowIndex >= 0 ? `Baris ${item.rowIndex + 1}` : 'Dokumen'}
+                      </td>
+                      <td className="py-2 px-3 font-semibold">
+                        {(item.field && (FIELD_LABELS[item.field] || item.field)) || '-'}
+                      </td>
+                      <td className="py-2 px-3 font-mono-tabular text-[#718096]">{item.value || '-'}</td>
+                      <td className="py-2 px-3 text-rose-800">{item.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => setIssuesModalReport(null)}
+                className="px-4 py-2 rounded-xl bg-[#10243A] text-white text-xs font-semibold"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Detail Peserta Modal */}
+      {detailStudent && (
+        <div className="fixed inset-0 z-50 bg-[#10243A]/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-[#E5EAF0] max-w-lg w-full p-6 space-y-4 shadow-elevated">
+            <div className="flex items-start justify-between gap-3 border-b border-[#E5EAF0] pb-3">
+              <div>
+                <h3 className="font-display text-base font-bold text-[#10243A]">
+                  Detail Data Peserta (DNPU)
+                </h3>
+                <p className="text-xs text-[#718096] mt-0.5">{detailStudent.nama}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetailStudent(null)}
+                className="text-[#718096] hover:text-[#172B4D] p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              {(
+                [
+                  ['No. Urut', detailStudent.no_urut || '-'],
+                  ['Nomor Peserta', detailStudent.nomor_peserta],
+                  ['NISN', detailStudent.nisn || '-'],
+                  ['NIS', detailStudent.nis || '-'],
+                  ['Nama Lengkap', detailStudent.nama],
+                  ['Jenis Kelamin', detailStudent.jk || '-'],
+                  ['Kelas', detailStudent.kelas],
+                  ['Status', detailStudent.status || 'Aktif'],
+                  ['User Ujian', detailStudent.user_ujian || '-'],
+                  ['Password Ujian', detailStudent.password_ujian || '-'],
+                  ['Sesi', detailStudent.sesi || '-'],
+                  ['Ruang', detailStudent.ruang || '-'],
+                  ['Meja / Kursi', detailStudent.meja || '-'],
+                ] as const
+              ).map(([lbl, val]) => (
+                <div key={lbl} className="p-2.5 rounded-xl bg-[#F5F7FA] border border-[#E5EAF0]">
+                  <span className="text-[11px] text-[#718096] block">{lbl}</span>
+                  <strong className="font-mono-tabular text-[#10243A] break-all">{val}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const target = detailStudent;
+                  setDetailStudent(null);
+                  setEditStudentModal({ mode: 'edit', form: { ...target } });
+                }}
+                className="px-4 py-2 rounded-xl border border-[#087F5B] text-[#087F5B] text-xs font-semibold"
+              >
+                Edit Data
+              </button>
+              <button
+                type="button"
+                onClick={() => setDetailStudent(null)}
+                className="px-4 py-2 rounded-xl bg-[#10243A] text-white text-xs font-semibold"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tambah / Edit Peserta Modal */}
+      {editStudentModal && (
+        <div className="fixed inset-0 z-50 bg-[#10243A]/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSaveStudent}
+            className="bg-white rounded-2xl border border-[#E5EAF0] max-w-2xl w-full p-6 space-y-4 shadow-elevated max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between border-b border-[#E5EAF0] pb-3">
+              <h3 className="font-display text-base font-bold text-[#10243A]">
+                {editStudentModal.mode === 'create' ? 'Tambah Peserta Ujian' : 'Edit Data Peserta Ujian'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setEditStudentModal(null)}
+                className="text-[#718096] hover:text-[#172B4D] p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              {(
+                [
+                  { key: 'no_urut', label: 'No. Urut' },
+                  { key: 'nomor_peserta', label: 'Nomor Peserta *', required: true },
+                  { key: 'nisn', label: 'NISN' },
+                  { key: 'nis', label: 'NIS' },
+                  { key: 'nama', label: 'Nama Lengkap *', required: true },
+                  { key: 'jk', label: 'Jenis Kelamin (L/P)' },
+                  { key: 'kelas', label: 'Kelas *', required: true },
+                  { key: 'user_ujian', label: 'User Ujian' },
+                  { key: 'password_ujian', label: 'Password Ujian' },
+                  { key: 'sesi', label: 'Sesi' },
+                  { key: 'ruang', label: 'Ruang' },
+                  { key: 'meja', label: 'Meja / Kursi' },
+                  { key: 'status', label: 'Status' },
+                ] as Array<{ key: keyof StudentRecord; label: string; required?: boolean }>
+              ).map((fld) => (
+                <div key={fld.key}>
+                  <label className="block font-semibold text-[#172B4D] mb-1">{fld.label}</label>
+                  <input
+                    type="text"
+                    required={fld.required}
+                    value={String(editStudentModal.form[fld.key] ?? '')}
+                    onChange={(e) =>
+                      setEditStudentModal({
+                        ...editStudentModal,
+                        form: { ...editStudentModal.form, [fld.key]: e.target.value },
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-[#E5EAF0] text-xs min-h-[38px]"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setEditStudentModal(null)}
+                className="px-4 py-2 rounded-xl border border-[#E5EAF0] text-xs font-semibold"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                disabled={savingStudent}
+                className="px-4 py-2 rounded-xl bg-[#087F5B] text-white text-xs font-semibold disabled:opacity-60"
+              >
+                {savingStudent ? 'Menyimpan...' : 'Simpan Data Peserta'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Konfirmasi Hapus Peserta Modal */}
+      {deleteStudentTarget && (
+        <div className="fixed inset-0 z-50 bg-[#10243A]/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-[#E5EAF0] max-w-md w-full p-6 space-y-4 shadow-elevated">
+            <h3 className="font-display text-base font-bold text-[#10243A]">Hapus Data Peserta?</h3>
+            <p className="text-xs text-[#718096] leading-relaxed">
+              Anda yakin ingin menghapus peserta <strong>{deleteStudentTarget.nama}</strong> ({deleteStudentTarget.nomor_peserta})? Tindakan ini akan dicatat pada audit log.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteStudentTarget(null)}
+                className="px-4 py-2 rounded-xl border border-[#E5EAF0] text-xs font-semibold"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteStudent}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold"
+              >
+                Ya, Hapus Peserta
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
