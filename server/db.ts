@@ -1,33 +1,176 @@
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { getServerWibNow } from './time.ts';
 
 let poolInstance: Pool | null = null;
 let initPromise: Promise<void> | null = null;
 
-function isValidPostgresUrl(val: string): boolean {
-  if (!val || !/^postgres(ql)?:\/\//i.test(val)) return false;
-  if (val.includes('postgresql://user:password@host:') || val.includes('MY_DATABASE_URL')) {
-    return false;
+type DbConfigStatus = 'valid' | 'missing_env' | 'invalid_format';
+
+export type DatabaseHealthStatus =
+  | 'connected'
+  | 'missing_env'
+  | 'invalid_format'
+  | 'connection_failed';
+
+interface ResolvedDbConfig {
+  status: DbConfigStatus;
+  connectionString: string;
+  sourceKey: string | null;
+  reason: string | null;
+}
+
+function stripOuterQuotes(value: string): string {
+  if (
+    (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+    (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+  ) {
+    return value.slice(1, -1).trim();
   }
+  return value;
+}
+
+export function normalizeDatabaseConnectionInput(raw: string): string {
+  let normalized = raw.trim();
+  normalized = stripOuterQuotes(normalized);
+
+  const envPrefixMatch = normalized.match(
+    /^(?:DATABASE_URL|POSTGRES_URL|POSTGRES_PRISMA_URL|POSTGRES_URL_NON_POOLING)\s*=\s*(.+)$/
+  );
+  if (envPrefixMatch) {
+    normalized = stripOuterQuotes(envPrefixMatch[1].trim());
+  }
+
+  if (/^psql\s+/i.test(normalized)) {
+    normalized = stripOuterQuotes(normalized.replace(/^psql\s+/i, '').trim());
+  }
+
+  return normalized;
+}
+
+export function validatePostgresConnectionString(
+  normalized: string
+): { valid: boolean; reason: string | null } {
+  if (!normalized) {
+    return { valid: false, reason: 'String koneksi kosong.' };
+  }
+  if (
+    normalized.includes('postgresql://user:password@host:') ||
+    normalized === 'MY_DATABASE_URL'
+  ) {
+    return { valid: false, reason: 'String koneksi masih berisi nilai template placeholder.' };
+  }
+  if (!/^postgres(ql)?:\/\//i.test(normalized)) {
+    return { valid: false, reason: 'Format harus diawali skema postgres:// atau postgresql://.' };
+  }
+
   try {
-    const parsed = new URL(val);
-    return Boolean(parsed.hostname && parsed.hostname !== 'base' && parsed.hostname !== 'host');
+    const parsed = parsePgConnectionString(normalized);
+    if (!parsed.host || parsed.host === 'base' || parsed.host === 'host') {
+      return { valid: false, reason: 'Hostname PostgreSQL tidak valid atau belum diisi.' };
+    }
+    if (!parsed.database) {
+      return { valid: false, reason: 'Nama database tidak ditemukan pada string koneksi.' };
+    }
+    return { valid: true, reason: null };
   } catch {
-    return false;
+    return { valid: false, reason: 'Gagal diurai oleh parser PostgreSQL (pg-connection-string).' };
   }
+}
+
+export function resolveDatabaseConfig(): ResolvedDbConfig {
+  const orderedKeys = [
+    'DATABASE_URL',
+    'POSTGRES_URL',
+    'POSTGRES_PRISMA_URL',
+    'POSTGRES_URL_NON_POOLING',
+  ] as const;
+
+  for (const key of orderedKeys) {
+    const raw = process.env[key];
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+      continue;
+    }
+
+    const normalized = normalizeDatabaseConnectionInput(raw);
+    const check = validatePostgresConnectionString(normalized);
+    if (check.valid) {
+      return {
+        status: 'valid',
+        connectionString: normalized,
+        sourceKey: key,
+        reason: null,
+      };
+    }
+
+    console.error(`[SIPENGUJI DB] ${key} terisi tetapi format tidak valid: ${check.reason}`);
+    return {
+      status: 'invalid_format',
+      connectionString: '',
+      sourceKey: key,
+      reason: check.reason,
+    };
+  }
+
+  return {
+    status: 'missing_env',
+    connectionString: '',
+    sourceKey: null,
+    reason: 'Variabel DATABASE_URL maupun alternatif PostgreSQL tidak ditemukan di process.env.',
+  };
 }
 
 function getConnectionString(): string {
-  const candidates = [
-    process.env.DATABASE_URL?.trim() || '',
-    process.env.POSTGRES_URL?.trim() || '',
-    process.env.POSTGRES_PRISMA_URL?.trim() || '',
-  ];
-  return candidates.find((c) => isValidPostgresUrl(c)) || '';
+  const resolved = resolveDatabaseConfig();
+  return resolved.status === 'valid' ? resolved.connectionString : '';
 }
 
 export function isDatabaseConfigured(): boolean {
-  return getConnectionString().length > 0;
+  return resolveDatabaseConfig().status === 'valid';
+}
+
+export async function checkDatabaseHealth(): Promise<{
+  databaseConfigured: boolean;
+  databaseConnected: boolean;
+  status: DatabaseHealthStatus;
+}> {
+  const cfg = resolveDatabaseConfig();
+  if (cfg.status === 'missing_env') {
+    console.warn('[SIPENGUJI Health] Variabel koneksi database tidak ditemukan pada process.env.');
+    return {
+      databaseConfigured: false,
+      databaseConnected: false,
+      status: 'missing_env',
+    };
+  }
+  if (cfg.status === 'invalid_format') {
+    return {
+      databaseConfigured: false,
+      databaseConnected: false,
+      status: 'invalid_format',
+    };
+  }
+
+  try {
+    await getPool().query('SELECT 1');
+    return {
+      databaseConfigured: true,
+      databaseConnected: true,
+      status: 'connected',
+    };
+  } catch (err) {
+    const errObj = err as { code?: string; message?: string };
+    console.error('[SIPENGUJI Health] Uji koneksi PostgreSQL gagal:', {
+      sourceKey: cfg.sourceKey,
+      code: errObj?.code || 'UNKNOWN',
+      message: errObj?.message || 'Koneksi ditolak atau timeout',
+    });
+    return {
+      databaseConfigured: true,
+      databaseConnected: false,
+      status: 'connection_failed',
+    };
+  }
 }
 
 export function getPool(): Pool {

@@ -18,6 +18,7 @@ import {
 } from './auth.ts';
 import {
   appendAuditLog,
+  checkDatabaseHealth,
   createNotification,
   ELEVEN_DOCS_CATALOG,
   ensureDbReady,
@@ -28,6 +29,7 @@ import {
   notifyAllAdmins,
   query,
   queryOne,
+  resolveDatabaseConfig,
   withTransaction,
 } from './db.ts';
 import {
@@ -174,16 +176,22 @@ export function createApiRouter(): express.Router {
   // ========================
   // HEALTH & SERVER WIB TIME
   // ========================
-  router.get('/health', (_req, res) => {
-    const blobStatus = getBlobStatus();
-    res.json({
-      ok: true,
-      databaseConfigured: isDatabaseConfigured(),
-      blobConfigured: blobStatus.blobConfigured,
-      blobNotice: blobStatus.message,
-      serverTime: getServerWibNow(),
-    });
-  });
+  router.get(
+    '/health',
+    asyncHandler(async (_req, res) => {
+      const blobStatus = getBlobStatus();
+      const dbHealth = await checkDatabaseHealth();
+      res.json({
+        ok: true,
+        databaseConfigured: dbHealth.databaseConfigured,
+        databaseConnected: dbHealth.databaseConnected,
+        databaseStatus: dbHealth.status,
+        blobConfigured: blobStatus.blobConfigured,
+        blobNotice: blobStatus.message,
+        serverTime: getServerWibNow(),
+      });
+    })
+  );
 
   router.get('/server-time', (_req, res) => {
     res.json(getServerWibNow());
@@ -192,10 +200,13 @@ export function createApiRouter(): express.Router {
   // Ensure PostgreSQL is configured and initialized before all stateful API routes
   router.use(
     asyncHandler(async (_req, res, next) => {
-      if (!isDatabaseConfigured()) {
+      const cfg = resolveDatabaseConfig();
+      if (cfg.status !== 'valid') {
         res.status(503).json({
           error:
-            'Database PostgreSQL (DATABASE_URL) belum dikonfigurasi pada Environment Variables Vercel.',
+            cfg.status === 'invalid_format'
+              ? 'Format connection string PostgreSQL pada server tidak valid. Periksa log server.'
+              : 'Database PostgreSQL (DATABASE_URL) belum dikonfigurasi pada Environment Variables Vercel.',
         });
         return;
       }
