@@ -2,7 +2,6 @@ import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import './server/db.ts';
 import { createApiRouter } from './server/routes.ts';
 import { setupWebSocketServer } from './server/ws.ts';
@@ -26,6 +25,7 @@ async function startServer() {
       res.sendFile(path.join(distDir, 'index.html'));
     });
   } else {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -36,7 +36,7 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`SIPENGUJI server running on http://0.0.0.0:${PORT}`);
   });

@@ -51,7 +51,9 @@ export async function apiFetch<T>(
   if (!res.ok) {
     const message =
       (typeof json.error === 'string' && json.error) ||
-      `Permintaan gagal (${res.status})`;
+      (res.status === 404
+        ? 'Layanan API tidak ditemukan (404). Muat ulang halaman atau buka melalui URL pratinjau aplikasi aktif.'
+        : `Permintaan gagal (${res.status})`);
     throw new ApiError(message, res.status, json);
   }
 

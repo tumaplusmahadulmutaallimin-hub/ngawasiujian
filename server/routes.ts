@@ -2564,5 +2564,9 @@ export function createApiRouter(): express.Router {
     });
   });
 
+  router.use((_req, res) => {
+    res.status(404).json({ error: 'Endpoint API tidak ditemukan (404).' });
+  });
+
   return router;
 }
