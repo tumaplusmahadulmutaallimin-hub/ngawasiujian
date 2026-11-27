@@ -1,0 +1,6 @@
+{
+  "name": "SIPENGUJI",
+  "description": "Sistem Informasi Pengawasan Ujian Madrasah — pengelolaan administrasi pengawasan, denah peserta interaktif, peringatan bertingkat, izin keluar, berita acara digital, dan monitoring ujian terpusat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
