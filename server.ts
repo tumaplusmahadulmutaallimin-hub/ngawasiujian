@@ -2,9 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import path from 'path';
-import './server/db.ts';
 import { createApiRouter } from './server/routes.ts';
-import { setupWebSocketServer } from './server/ws.ts';
 
 async function startServer() {
   const app = express();
@@ -15,7 +13,6 @@ async function startServer() {
   app.use('/api', createApiRouter());
 
   const server = http.createServer(app);
-  setupWebSocketServer(server);
 
   const isProd = process.env.NODE_ENV === 'production';
   if (isProd) {

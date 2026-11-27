@@ -39,22 +39,29 @@ export async function apiFetch<T>(
   });
 
   const text = await res.text();
-  let json: Record<string, unknown> = {};
+  let json: unknown = {};
+  let parseError = false;
   if (text) {
     try {
-      json = JSON.parse(text) as Record<string, unknown>;
+      json = JSON.parse(text);
     } catch {
+      parseError = true;
       json = { raw: text };
     }
   }
 
   if (!res.ok) {
+    const errObj = (json && typeof json === 'object' ? json : {}) as Record<string, unknown>;
     const message =
-      (typeof json.error === 'string' && json.error) ||
+      (typeof errObj.error === 'string' && errObj.error) ||
       (res.status === 404
         ? 'Layanan API tidak ditemukan (404). Muat ulang halaman atau buka melalui URL pratinjau aplikasi aktif.'
         : `Permintaan gagal (${res.status})`);
-    throw new ApiError(message, res.status, json);
+    throw new ApiError(message, res.status, errObj);
+  }
+
+  if (parseError) {
+    throw new ApiError('Respons server bukan JSON yang valid.', res.status, { raw: text });
   }
 
   return json as T;

@@ -19,7 +19,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import { apiFetch, getAuthToken } from '../lib/api.ts';
+import { apiFetch } from '../lib/api.ts';
 import type { DocDataset } from '../lib/pdfGenerator.ts';
 import type {
   AuthUser,
@@ -48,6 +48,7 @@ interface SupervisionRoomPayload {
   room: RoomRecord;
   seats: SeatWithState[];
   incidents: IncidentReportRecord[];
+  activePeers?: Array<{ userId: number; nama: string; role: string }>;
   reports: SupervisionReportRecord[];
 }
 
@@ -101,8 +102,8 @@ export const SupervisionRoom: React.FC<SupervisionRoomProps> = ({
     origY: 0,
   });
 
-  // WebSocket & Pending Sync Queue (BR-11)
-  const [wsConnected, setWsConnected] = useState(false);
+  // Serverless Polling & Pending Sync Queue (BR-11)
+  const [syncConnected, setSyncConnected] = useState(false);
   const [activePeers, setActivePeers] = useState<Array<{ userId: number; nama: string; role: string }>>([]);
   const [pendingQueue, setPendingQueue] = useState<PendingSyncAction[]>([]);
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
@@ -122,6 +123,7 @@ export const SupervisionRoom: React.FC<SupervisionRoomProps> = ({
   const [dhFile, setDhFile] = useState<File | null>(null);
   const [dhCatatan, setDhCatatan] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [blobNotice, setBlobNotice] = useState<string | null>(null);
 
   // Room document preview modal
   const [previewDoc, setPreviewDoc] = useState<{ key: string; title: string } | null>(null);
@@ -130,8 +132,13 @@ export const SupervisionRoom: React.FC<SupervisionRoomProps> = ({
     try {
       const payload = await apiFetch<SupervisionRoomPayload>(`/api/supervision/${scheduleId}`);
       setData(payload);
+      if (Array.isArray(payload.activePeers)) {
+        setActivePeers(payload.activePeers);
+      }
+      setSyncConnected(true);
       setErrorMsg(null);
     } catch (err) {
+      setSyncConnected(false);
       setErrorMsg(err instanceof Error ? err.message : 'Gagal memuat ruang pengawasan.');
     } finally {
       setLoading(false);
@@ -186,55 +193,35 @@ export const SupervisionRoom: React.FC<SupervisionRoomProps> = ({
     }
   }, [isOnline, pendingQueue.length, flushPendingQueue]);
 
+  // Visibility-aware collaborative polling (replaces persistent local WebSocket for Vercel serverless)
   useEffect(() => {
-    const token = getAuthToken();
-    if (!token) return;
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws?token=${encodeURIComponent(token)}`);
-
-    ws.onopen = () => {
-      setWsConnected(true);
-      ws.send(JSON.stringify({ type: 'join:schedule', scheduleId }));
+    const poll = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      loadRoom();
     };
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data) as {
-          type?: string;
-          scheduleId?: number;
-          activeUsers?: Array<{ userId: number; nama: string; role: string }>;
-        };
-        if (msg.type === 'presence:updated' && msg.scheduleId === scheduleId) {
-          setActivePeers(msg.activeUsers || []);
-        } else if (
-          msg.scheduleId === scheduleId &&
-          [
-            'attendance:updated',
-            'warning:created',
-            'exit:updated',
-            'incident:created',
-            'supervision:updated',
-            'report:updated',
-          ].includes(msg.type || '')
-        ) {
-          loadRoom();
-        }
-      } catch {
-        // Ignore malformed ws event
+    const intervalId = setInterval(poll, 3500);
+    const onVisibilityOrFocus = () => {
+      if (typeof document === 'undefined' || !document.hidden) {
+        loadRoom();
       }
     };
-
-    ws.onclose = () => {
-      setWsConnected(false);
-    };
-
+    window.addEventListener('focus', onVisibilityOrFocus);
+    document.addEventListener('visibilitychange', onVisibilityOrFocus);
     return () => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'leave:schedule', scheduleId }));
-      }
-      ws.close();
+      clearInterval(intervalId);
+      window.removeEventListener('focus', onVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', onVisibilityOrFocus);
     };
-  }, [scheduleId, loadRoom]);
+  }, [loadRoom]);
+
+  useEffect(() => {
+    apiFetch<{ blobConfigured?: boolean; blobNotice?: string | null }>('/api/health')
+      .then((res) => {
+        setBlobNotice(res.blobConfigured === false ? res.blobNotice || null : null);
+      })
+      .catch(() => undefined);
+  }, []);
 
   const remainingSeconds = useMemo(() => {
     if (!data) return 0;
@@ -643,12 +630,18 @@ export const SupervisionRoom: React.FC<SupervisionRoomProps> = ({
         <div className="bg-white border border-[#E5EAF0] rounded-xl px-4 py-3.5 shadow-card flex flex-wrap items-center justify-between gap-4 text-xs sm:text-sm">
           <div className="flex flex-wrap items-center gap-4">
             <span className="inline-flex items-center gap-1.5 font-medium text-[#172B4D]">
-              {wsConnected ? (
+              {syncConnected && isOnline ? (
                 <Wifi className="w-4 h-4 text-[#087F5B]" />
               ) : (
                 <WifiOff className="w-4 h-4 text-[#718096]" />
               )}
-              <span>{wsConnected ? 'Sinkronisasi Real-Time Aktif' : 'Menghubungkan...'}</span>
+              <span>
+                {syncConnected && isOnline
+                  ? 'Sinkronisasi Real-Time Aktif'
+                  : isOnline
+                  ? 'Menghubungkan...'
+                  : 'Offline'}
+              </span>
             </span>
             <span aria-hidden="true" className="text-[#E5EAF0]">|</span>
             <span className="inline-flex items-center gap-1.5 text-[#718096]">
@@ -1422,6 +1415,12 @@ export const SupervisionRoom: React.FC<SupervisionRoomProps> = ({
 
               {!readOnlyMonitor && dhReport?.status !== 'terverifikasi' && (
                 <form onSubmit={handleUploadDaftarHadir} className="space-y-3.5">
+                  {blobNotice && (
+                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-700" />
+                      <span>{blobNotice}</span>
+                    </div>
+                  )}
                   <div>
                     <label className="block text-xs font-semibold text-[#172B4D] mb-1.5">
                       Unggah Hasil Scan / Foto Daftar Hadir (PDF, PNG, JPG) *

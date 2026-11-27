@@ -29,7 +29,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { apiFetch, downloadAuthenticatedFile, getAuthToken } from '../lib/api.ts';
+import { apiFetch, downloadAuthenticatedFile } from '../lib/api.ts';
 import { generateAdminDocumentPdf, generateRecapPdf, type DocDataset } from '../lib/pdfGenerator.ts';
 import type {
   AuditLogRecord,
@@ -131,6 +131,7 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
   const [batches, setBatches] = useState<Array<Record<string, unknown>>>([]);
   const [activeBatch, setActiveBatch] = useState<ImportBatchRecord | null>(null);
   const [uploadingImport, setUploadingImport] = useState(false);
+  const [blobNotice, setBlobNotice] = useState<string | null>(null);
 
   // 11 Docs Generator states
   const [docCatalog, setDocCatalog] = useState<Array<{ doc_key: string; title: string }>>([]);
@@ -216,34 +217,49 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
     }
   }, [section, auditQuery]);
 
+  const prevLevel3CountRef = React.useRef<number | null>(null);
+
+  useEffect(() => {
+    const currentCount = monitoring?.summary?.level3Count;
+    if (typeof currentCount === 'number') {
+      if (prevLevel3CountRef.current !== null && currentCount > prevLevel3CountRef.current) {
+        setToast({
+          message:
+            'Peringatan Tingkat 3 baru dilaporkan dari ruang ujian! Periksa panel Peringatan Peserta.',
+          type: 'error',
+        });
+      }
+      prevLevel3CountRef.current = currentCount;
+    }
+  }, [monitoring?.summary?.level3Count]);
+
+  useEffect(() => {
+    apiFetch<{ blobConfigured?: boolean; blobNotice?: string | null }>('/api/health')
+      .then((res) => {
+        setBlobNotice(res.blobConfigured === false ? res.blobNotice || null : null);
+      })
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     loadSectionData();
-  }, [loadSectionData]);
-
-  // Real-time WebSocket monitoring updates
-  useEffect(() => {
-    const token = getAuthToken();
-    if (!token) return;
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws?token=${encodeURIComponent(token)}`);
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data) as { type?: string };
-        if (msg.type === 'monitoring:updated' || msg.type === 'warning:level3' || msg.type === 'notification:new') {
-          loadSectionData();
-          if (msg.type === 'warning:level3') {
-            setToast({
-              message:
-                'Peringatan Tingkat 3 baru dilaporkan dari ruang ujian! Periksa panel Peringatan Peserta.',
-              type: 'error',
-            });
-          }
-        }
-      } catch {
-        // Ignore
+    const poll = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      loadSectionData();
+    };
+    const intervalId = setInterval(poll, 10_000);
+    const onFocus = () => {
+      if (typeof document === 'undefined' || !document.hidden) {
+        loadSectionData();
       }
     };
-    return () => ws.close();
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
   }, [loadSectionData]);
 
   if (monitoringRoomId !== null) {
@@ -1239,6 +1255,13 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
                         Muat Paket Sampel SAUM (Siap Uji)
                       </button>
                     </div>
+
+                    {blobNotice && (
+                      <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2.5">
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-700" />
+                        <span>{blobNotice}</span>
+                      </div>
+                    )}
 
                     <label className="block border-2 border-dashed border-[#E5EAF0] hover:border-[#087F5B] rounded-xl p-8 text-center cursor-pointer transition-colors bg-[#F5F7FA]">
                       <Upload className="w-7 h-7 text-[#087F5B] mx-auto mb-2" />

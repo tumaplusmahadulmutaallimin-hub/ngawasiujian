@@ -1,9 +1,8 @@
 import { GoogleGenAI, Type } from '@google/genai';
-import * as XLSX from 'xlsx';
-import fs from 'fs';
 import path from 'path';
+import * as XLSX from 'xlsx';
 import type { ImportDocType } from '../src/types.ts';
-import { db } from './db.ts';
+import { queryOne } from './db.ts';
 import { getServerWibNow } from './time.ts';
 
 export interface ExtractionResult {
@@ -106,14 +105,14 @@ function classifyByHeaders(headers: string[]): { type: ImportDocType; confidence
   return { type: 'dokumen_pendukung', confidence: 0.52 };
 }
 
-export function detectDuplicatesAndUnreadable(
+export async function detectDuplicatesAndUnreadable(
   docType: ImportDocType,
   rows: Array<Record<string, unknown>>,
   examId?: number | null
-): {
+): Promise<{
   unreadable_fields: Array<{ rowIndex: number; field: string; reason: string }>;
   duplicates: Array<{ rowIndex: number; field: string; value: string; source: string }>;
-} {
+}> {
   const unreadable_fields: Array<{ rowIndex: number; field: string; reason: string }> = [];
   const duplicates: Array<{ rowIndex: number; field: string; value: string; source: string }> = [];
 
@@ -135,7 +134,8 @@ export function detectDuplicatesAndUnreadable(
   const seenNip = new Set<string>();
   const seenScheduleSlot = new Set<string>();
 
-  rows.forEach((row, rowIndex) => {
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
     for (const field of requiredFields) {
       const val = row[field];
       if (val === null || val === undefined || String(val).trim() === '') {
@@ -166,9 +166,10 @@ export function detectDuplicatesAndUnreadable(
       } else {
         seenNomorPeserta.add(key);
         if (examId && docType === 'data_peserta') {
-          const existing = db
-            .prepare(`SELECT id FROM students WHERE exam_id = ? AND nomor_peserta = ?`)
-            .get(examId, key);
+          const existing = await queryOne<{ id: number }>(
+            `SELECT id FROM students WHERE exam_id = $1 AND nomor_peserta = $2`,
+            [examId, key]
+          );
           if (existing) {
             duplicates.push({
               rowIndex,
@@ -222,13 +223,13 @@ export function detectDuplicatesAndUnreadable(
         seenScheduleSlot.add(slot);
       }
     }
-  });
+  }
 
   return { unreadable_fields, duplicates };
 }
 
-export async function extractDocumentFromFile(
-  filePath: string,
+export async function extractDocumentFromBuffer(
+  fileBuffer: Buffer,
   originalName: string,
   mimeType: string,
   examId?: number | null
@@ -236,8 +237,7 @@ export async function extractDocumentFromFile(
   const ext = path.extname(originalName).toLowerCase();
 
   if (ext === '.xlsx' || ext === '.xls' || ext === '.csv') {
-    const buf = fs.readFileSync(filePath);
-    const workbook = XLSX.read(buf, { type: 'buffer' });
+    const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
     const firstSheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[firstSheetName];
     const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
@@ -256,7 +256,11 @@ export async function extractDocumentFromFile(
 
     const headers = normalizedRows.length > 0 ? Object.keys(normalizedRows[0]) : [];
     const { type, confidence } = classifyByHeaders(headers);
-    const { unreadable_fields, duplicates } = detectDuplicatesAndUnreadable(type, normalizedRows, examId);
+    const { unreadable_fields, duplicates } = await detectDuplicatesAndUnreadable(
+      type,
+      normalizedRows,
+      examId
+    );
 
     return {
       detected_type: type,
@@ -267,10 +271,9 @@ export async function extractDocumentFromFile(
     };
   }
 
-  // PDF (text/scan) or Image scan via server-side Gemini multimodal OCR
   if (!process.env.GEMINI_API_KEY) {
     throw new Error(
-      'GEMINI_API_KEY belum dikonfigurasi di server untuk ekstraksi PDF/gambar hasil scan. Gunakan file XLSX/CSV atau atur GEMINI_API_KEY di panel Secrets.'
+      'GEMINI_API_KEY belum dikonfigurasi di Environment Variables untuk ekstraksi PDF/gambar hasil scan. Gunakan file XLSX/CSV atau atur GEMINI_API_KEY di Vercel.'
     );
   }
 
@@ -283,8 +286,7 @@ export async function extractDocumentFromFile(
     },
   });
 
-  const fileBytes = fs.readFileSync(filePath);
-  const base64Data = fileBytes.toString('base64');
+  const base64Data = fileBuffer.toString('base64');
   const resolvedMime =
     mimeType && mimeType !== 'application/octet-stream'
       ? mimeType
@@ -401,7 +403,11 @@ ATURAN WAJIB (BR-08):
   });
 
   const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.7;
-  const { unreadable_fields, duplicates } = detectDuplicatesAndUnreadable(detectedType, cleanedRows, examId);
+  const { unreadable_fields, duplicates } = await detectDuplicatesAndUnreadable(
+    detectedType,
+    cleanedRows,
+    examId
+  );
 
   return {
     detected_type: detectedType,

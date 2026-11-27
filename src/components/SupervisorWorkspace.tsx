@@ -17,7 +17,7 @@ import {
   User,
   Users,
 } from 'lucide-react';
-import { apiFetch, getAuthToken } from '../lib/api.ts';
+import { apiFetch } from '../lib/api.ts';
 import type { AuthUser, NotificationRecord, SupervisionScheduleItem } from '../types.ts';
 import { BrandMark, useServerWibClock } from './BrandMark.tsx';
 import { SignaturePad } from './SignaturePad.tsx';
@@ -90,30 +90,23 @@ export const SupervisorWorkspace: React.FC<SupervisorWorkspaceProps> = ({
 
   useEffect(() => {
     loadData();
-    const id = setInterval(loadData, 20_000);
-    return () => clearInterval(id);
-  }, [loadData]);
-
-  // Listen for real-time schedule / verification notifications
-  useEffect(() => {
-    const token = getAuthToken();
-    if (!token) return;
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws?token=${encodeURIComponent(token)}`);
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data) as { type?: string };
-        if (msg.type === 'notification:new' || msg.type === 'report:updated') {
-          loadData();
-          if (msg.type === 'notification:new') {
-            setToast({ message: 'Notifikasi baru diterima dari Panitia.', type: 'info' });
-          }
-        }
-      } catch {
-        // Ignore
+    const poll = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      loadData();
+    };
+    const id = setInterval(poll, 10_000);
+    const onFocus = () => {
+      if (typeof document === 'undefined' || !document.hidden) {
+        loadData();
       }
     };
-    return () => ws.close();
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
   }, [loadData]);
 
   if (activeRoomScheduleId !== null) {

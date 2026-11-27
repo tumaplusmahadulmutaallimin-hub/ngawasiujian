@@ -17,7 +17,7 @@ import {
   UserCheck,
   UserPlus,
 } from 'lucide-react';
-import { apiFetch, setAuthToken } from '../lib/api.ts';
+import { ApiError, apiFetch, setAuthToken } from '../lib/api.ts';
 import type { AuthUser } from '../types.ts';
 import { BrandMark, useServerWibClock } from './BrandMark.tsx';
 import { SignaturePad } from './SignaturePad.tsx';
@@ -75,15 +75,19 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
 
   const loadStatusAndDir = async () => {
     try {
-      const status = await apiFetch<{ needsAdminSetup: boolean }>('/api/auth/status');
-      setNeedsAdminSetup(status.needsAdminSetup);
-      if (status.needsAdminSetup) {
+      const status = await apiFetch<{ needsAdminSetup?: boolean }>('/api/auth/status');
+      const needsSetup = Boolean(status?.needsAdminSetup);
+      setNeedsAdminSetup(needsSetup);
+      if (needsSetup) {
         setAuthMode('admin_login');
       }
       const dir = await apiFetch<SupervisorDirectoryItem[]>('/api/auth/supervisors-directory');
-      setDirectory(dir);
-    } catch {
-      // Ignore initial load error
+      setDirectory(Array.isArray(dir) ? dir : []);
+    } catch (err) {
+      setDirectory([]);
+      if (err instanceof ApiError && (err.status === 503 || err.status >= 500)) {
+        setErrorMsg(err.message);
+      }
     }
   };
 
@@ -204,7 +208,8 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
     }
   };
 
-  const selectedSupObj = directory.find((d) => d.id === Number(selectedSupId));
+  const safeDirectory = Array.isArray(directory) ? directory : [];
+  const selectedSupObj = safeDirectory.find((d) => d.id === Number(selectedSupId));
 
   return (
     <div className="min-h-screen bg-[#F5F7FA] text-[#172B4D] flex flex-col">
@@ -466,7 +471,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
                   </p>
                 </div>
 
-                {directory.length === 0 ? (
+                {safeDirectory.length === 0 ? (
                   <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-900">
                     Daftar pengawas belum tersedia. Admin perlu mengunggah dan mengonfirmasi data pengawas dari ekspor SAUM terlebih dahulu.
                   </div>
@@ -486,7 +491,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
                             className="w-full pl-10 pr-3.5 py-2.5 rounded-xl border border-[#E5EAF0] text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#087F5B] min-h-[46px]"
                           >
                             <option value="">-- Pilih nama resmi --</option>
-                            {directory.map((d) => (
+                            {safeDirectory.map((d) => (
                               <option key={d.id} value={d.id} disabled={d.already_registered}>
                                 {d.nama_lengkap} {d.already_registered ? '(Sudah Terdaftar)' : ''}
                               </option>

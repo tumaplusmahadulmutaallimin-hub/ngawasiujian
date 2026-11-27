@@ -1,324 +1,422 @@
-import crypto from 'crypto';
-import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
+import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import { getServerWibNow } from './time.ts';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-export const UPLOADS_DIR = path.resolve(DATA_DIR, 'uploads');
-const DB_PATH = path.resolve(DATA_DIR, 'sipenguji.db');
+let poolInstance: Pool | null = null;
+let initPromise: Promise<void> | null = null;
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-
-export const db = new Database(DB_PATH);
-
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('admin', 'supervisor')),
-    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
-    must_change_password INTEGER NOT NULL DEFAULT 0,
-    last_active_at TEXT,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS supervisors (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER UNIQUE REFERENCES users(id) ON DELETE SET NULL,
-    nama_lengkap TEXT NOT NULL,
-    nip_nuptk TEXT UNIQUE,
-    nomor_identitas TEXT,
-    tempat_lahir TEXT,
-    tgl_lahir TEXT,
-    alamat TEXT,
-    whatsapp TEXT,
-    foto_url TEXT,
-    ttd_url TEXT,
-    kode_verifikasi TEXT,
-    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS exams (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nama TEXT NOT NULL,
-    madrasah_nama TEXT NOT NULL DEFAULT 'Madrasah Aliyah Negeri',
-    tahun_ajaran TEXT NOT NULL,
-    tanggal_mulai TEXT NOT NULL,
-    tanggal_selesai TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'aktif' CHECK (status IN ('draft', 'aktif', 'selesai')),
-    warning_minutes_before_end INTEGER NOT NULL DEFAULT 15,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS exam_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-    nama_sesi TEXT NOT NULL,
-    tanggal TEXT NOT NULL,
-    jam_mulai TEXT NOT NULL,
-    jam_selesai TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS subjects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kode TEXT NOT NULL UNIQUE,
-    nama TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS rooms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kode TEXT NOT NULL UNIQUE,
-    nama TEXT NOT NULL,
-    kapasitas INTEGER NOT NULL CHECK (kapasitas > 0),
-    rows_count INTEGER NOT NULL DEFAULT 4,
-    cols_count INTEGER NOT NULL DEFAULT 5,
-    layout_json TEXT,
-    denah_lingkungan_json TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS students (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-    nomor_peserta TEXT NOT NULL,
-    nisn TEXT,
-    nis TEXT,
-    nama TEXT NOT NULL,
-    kelas TEXT NOT NULL,
-    UNIQUE(exam_id, nomor_peserta)
-  );
-
-  CREATE TABLE IF NOT EXISTS seats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    kode_kursi TEXT NOT NULL,
-    baris INTEGER NOT NULL,
-    kolom INTEGER NOT NULL,
-    posisi_x INTEGER NOT NULL DEFAULT 0,
-    posisi_y INTEGER NOT NULL DEFAULT 0,
-    student_id INTEGER REFERENCES students(id) ON DELETE SET NULL,
-    UNIQUE(room_id, kode_kursi)
-  );
-
-  CREATE TABLE IF NOT EXISTS exam_schedules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
-    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
-    room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    tanggal TEXT NOT NULL,
-    jam_mulai TEXT NOT NULL,
-    jam_selesai TEXT NOT NULL,
-    status_manual_cancel INTEGER NOT NULL DEFAULT 0,
-    actual_started_at TEXT,
-    actual_finished_at TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS supervision_assignments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    supervisor_id INTEGER NOT NULL REFERENCES supervisors(id) ON DELETE CASCADE,
-    room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    exam_session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
-    exam_schedule_id INTEGER REFERENCES exam_schedules(id) ON DELETE CASCADE,
-    peran TEXT NOT NULL DEFAULT 'utama' CHECK (peran IN ('utama', 'pendamping')),
-    status_jadwal TEXT NOT NULL DEFAULT 'akan_datang',
-    UNIQUE(supervisor_id, exam_schedule_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_id INTEGER REFERENCES exams(id) ON DELETE SET NULL,
-    jenis TEXT NOT NULL,
-    nama_file TEXT NOT NULL,
-    path TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    version INTEGER NOT NULL DEFAULT 1,
-    status_verifikasi TEXT NOT NULL DEFAULT 'tersimpan',
-    needs_regeneration INTEGER NOT NULL DEFAULT 0,
-    meta_json TEXT,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS generated_doc_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-    doc_key TEXT NOT NULL,
-    title TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1,
-    needs_regeneration INTEGER NOT NULL DEFAULT 0,
-    generated_at TEXT NOT NULL,
-    generated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    UNIQUE(exam_id, doc_key)
-  );
-
-  CREATE TABLE IF NOT EXISTS attendance (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'belum' CHECK (status IN ('hadir', 'tidak_hadir', 'belum')),
-    dicatat_oleh INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    waktu TEXT,
-    updated_version INTEGER NOT NULL DEFAULT 1,
-    UNIQUE(student_id, exam_schedule_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS supervisor_attendance (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    assignment_id INTEGER NOT NULL UNIQUE REFERENCES supervision_assignments(id) ON DELETE CASCADE,
-    waktu_hadir TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'hadir'
-  );
-
-  CREATE TABLE IF NOT EXISTS warnings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
-    tingkat INTEGER NOT NULL CHECK (tingkat IN (1, 2, 3)),
-    alasan TEXT NOT NULL,
-    is_correction INTEGER NOT NULL DEFAULT 0,
-    corrects_warning_id INTEGER REFERENCES warnings(id),
-    dicatat_oleh INTEGER NOT NULL REFERENCES users(id),
-    dicatat_oleh_nama TEXT NOT NULL,
-    waktu_server TEXT NOT NULL,
-    idempotency_key TEXT UNIQUE
-  );
-
-  CREATE TABLE IF NOT EXISTS exit_permissions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
-    alasan TEXT NOT NULL,
-    waktu_keluar TEXT NOT NULL,
-    waktu_kembali TEXT,
-    durasi_detik INTEGER,
-    dicatat_oleh INTEGER NOT NULL REFERENCES users(id),
-    dicatat_oleh_nama TEXT NOT NULL,
-    idempotency_key TEXT UNIQUE
-  );
-
-  CREATE TABLE IF NOT EXISTS incident_reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
-    deskripsi TEXT NOT NULL,
-    waktu TEXT NOT NULL,
-    dicatat_oleh INTEGER NOT NULL REFERENCES users(id),
-    dicatat_oleh_nama TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS supervision_reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
-    supervisor_id INTEGER NOT NULL REFERENCES supervisors(id) ON DELETE CASCADE,
-    jenis TEXT NOT NULL CHECK (jenis IN ('berita_acara', 'daftar_hadir')),
-    data_json TEXT,
-    file_path TEXT,
-    status TEXT NOT NULL DEFAULT 'belum_dikirim' CHECK (status IN ('belum_dikerjakan', 'belum_dikirim', 'menunggu_verifikasi', 'perlu_perbaikan', 'terverifikasi')),
-    dikirim_pada TEXT,
-    version INTEGER NOT NULL DEFAULT 1,
-    UNIQUE(exam_schedule_id, jenis)
-  );
-
-  CREATE TABLE IF NOT EXISTS report_verifications (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    report_id INTEGER NOT NULL REFERENCES supervision_reports(id) ON DELETE CASCADE,
-    admin_id INTEGER NOT NULL REFERENCES users(id),
-    status TEXT NOT NULL,
-    catatan TEXT,
-    waktu TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS notifications (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    judul TEXT NOT NULL,
-    isi TEXT NOT NULL,
-    kategori TEXT NOT NULL DEFAULT 'info',
-    link_target TEXT,
-    dibaca INTEGER NOT NULL DEFAULT 0,
-    dibuat_pada TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    username TEXT,
-    aksi TEXT NOT NULL,
-    entitas TEXT NOT NULL,
-    entitas_id TEXT,
-    nilai_lama TEXT,
-    nilai_baru TEXT,
-    waktu_server TEXT NOT NULL,
-    ip TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS import_batches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_id INTEGER REFERENCES exams(id) ON DELETE SET NULL,
-    filename TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    detected_type TEXT NOT NULL,
-    confidence REAL NOT NULL DEFAULT 1.0,
-    status TEXT NOT NULL DEFAULT 'preview' CHECK (status IN ('preview', 'confirmed', 'failed')),
-    extracted_json TEXT NOT NULL,
-    errors_json TEXT NOT NULL DEFAULT '[]',
-    duplicates_json TEXT NOT NULL DEFAULT '[]',
-    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL,
-    confirmed_at TEXT
-  );
-
-  -- BR-17 & AC-MON-03: Enforce append-only audit_logs at database level
-  CREATE TRIGGER IF NOT EXISTS prevent_audit_update
-  BEFORE UPDATE ON audit_logs
-  BEGIN
-    SELECT RAISE(ABORT, 'Audit log bersifat append-only dan tidak dapat diubah');
-  END;
-
-  CREATE TRIGGER IF NOT EXISTS prevent_audit_delete
-  BEFORE DELETE ON audit_logs
-  BEGIN
-    SELECT RAISE(ABORT, 'Audit log bersifat append-only dan tidak dapat dihapus');
-  END;
-`);
-
-// Safe schema migration for existing SQLite databases
-const userCols = db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
-if (!userCols.some((c) => c.name === 'must_change_password')) {
-  db.exec(`ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0`);
+function isValidPostgresUrl(val: string): boolean {
+  if (!val || !/^postgres(ql)?:\/\//i.test(val)) return false;
+  if (val.includes('postgresql://user:password@host:') || val.includes('MY_DATABASE_URL')) {
+    return false;
+  }
+  try {
+    const parsed = new URL(val);
+    return Boolean(parsed.hostname && parsed.hostname !== 'base' && parsed.hostname !== 'host');
+  } catch {
+    return false;
+  }
 }
 
-// Seed initial General Admin account (admin / admin123, must change password after login) if no admin exists
-const existingAdminRow = db.prepare(`SELECT id FROM users WHERE role = 'admin' LIMIT 1`).get();
-if (!existingAdminRow) {
-  const initialAdminPassword = process.env.DEFAULT_ADMIN_PASSWORD?.trim() || 'admin123';
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(initialAdminPassword, salt, 64).toString('hex');
-  const passwordHash = `${salt}:${derived}`;
-  const now = getServerWibNow().isoWib;
+function getConnectionString(): string {
+  const candidates = [
+    process.env.DATABASE_URL?.trim() || '',
+    process.env.POSTGRES_URL?.trim() || '',
+    process.env.POSTGRES_PRISMA_URL?.trim() || '',
+  ];
+  return candidates.find((c) => isValidPostgresUrl(c)) || '';
+}
 
-  const res = db
-    .prepare(
-      `INSERT INTO users (username, password_hash, role, status, must_change_password, last_active_at, created_at)
-       VALUES ('admin', ?, 'admin', 'active', 1, ?, ?)`
-    )
-    .run(passwordHash, now, now);
+export function isDatabaseConfigured(): boolean {
+  return getConnectionString().length > 0;
+}
 
-  db.prepare(
-    `INSERT INTO audit_logs (user_id, username, aksi, entitas, entitas_id, nilai_baru, waktu_server, ip)
-     VALUES (?, 'admin', 'ADMIN_DEFAULT_SEEDED', 'users', ?, ?, ?, 'system')`
-  ).run(
-    Number(res.lastInsertRowid),
-    String(res.lastInsertRowid),
-    JSON.stringify({ username: 'admin', role: 'admin', must_change_password: true }),
-    now
-  );
+export function getPool(): Pool {
+  if (poolInstance) return poolInstance;
+  const connectionString = getConnectionString();
+  if (!connectionString) {
+    throw new Error('DATABASE_URL belum dikonfigurasi pada Environment Variables server.');
+  }
+  const isLocal =
+    connectionString.includes('localhost') ||
+    connectionString.includes('127.0.0.1') ||
+    process.env.PGSSL === 'disable';
+
+  poolInstance = new Pool({
+    connectionString,
+    ssl: isLocal ? false : { rejectUnauthorized: false },
+    max: 5,
+    idleTimeoutMillis: 15_000,
+    connectionTimeoutMillis: 10_000,
+  });
+
+  return poolInstance;
+}
+
+export async function query<T extends QueryResultRow = Record<string, unknown>>(
+  sql: string,
+  params: unknown[] = [],
+  client?: PoolClient
+): Promise<T[]> {
+  const executor = client ?? getPool();
+  const res = await executor.query<T>(sql, params);
+  return res.rows;
+}
+
+export async function queryOne<T extends QueryResultRow = Record<string, unknown>>(
+  sql: string,
+  params: unknown[] = [],
+  client?: PoolClient
+): Promise<T | null> {
+  const rows = await query<T>(sql, params, client);
+  return rows[0] ?? null;
+}
+
+export async function execute(
+  sql: string,
+  params: unknown[] = [],
+  client?: PoolClient
+): Promise<number> {
+  const executor = client ?? getPool();
+  const res = await executor.query(sql, params);
+  return res.rowCount ?? 0;
+}
+
+export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function ensureDbReady(): Promise<void> {
+  if (!isDatabaseConfigured()) {
+    throw new Error('DATABASE_URL belum dikonfigurasi.');
+  }
+  if (!initPromise) {
+    initPromise = (async () => {
+      const pool = getPool();
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id SERIAL PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL CHECK (role IN ('admin', 'supervisor')),
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+          must_change_password INTEGER NOT NULL DEFAULT 0,
+          last_active_at TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS supervisors (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER UNIQUE REFERENCES users(id) ON DELETE SET NULL,
+          nama_lengkap TEXT NOT NULL,
+          nip_nuptk TEXT UNIQUE,
+          nomor_identitas TEXT,
+          tempat_lahir TEXT,
+          tgl_lahir TEXT,
+          alamat TEXT,
+          whatsapp TEXT,
+          foto_url TEXT,
+          ttd_url TEXT,
+          kode_verifikasi TEXT,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS exams (
+          id SERIAL PRIMARY KEY,
+          nama TEXT NOT NULL,
+          madrasah_nama TEXT NOT NULL DEFAULT 'Madrasah Aliyah Negeri',
+          tahun_ajaran TEXT NOT NULL,
+          tanggal_mulai TEXT NOT NULL,
+          tanggal_selesai TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'aktif' CHECK (status IN ('draft', 'aktif', 'selesai')),
+          warning_minutes_before_end INTEGER NOT NULL DEFAULT 15,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS exam_sessions (
+          id SERIAL PRIMARY KEY,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          nama_sesi TEXT NOT NULL,
+          tanggal TEXT NOT NULL,
+          jam_mulai TEXT NOT NULL,
+          jam_selesai TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS subjects (
+          id SERIAL PRIMARY KEY,
+          kode TEXT NOT NULL UNIQUE,
+          nama TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS rooms (
+          id SERIAL PRIMARY KEY,
+          kode TEXT NOT NULL UNIQUE,
+          nama TEXT NOT NULL,
+          kapasitas INTEGER NOT NULL CHECK (kapasitas > 0),
+          rows_count INTEGER NOT NULL DEFAULT 4,
+          cols_count INTEGER NOT NULL DEFAULT 5,
+          layout_json TEXT,
+          denah_lingkungan_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS students (
+          id SERIAL PRIMARY KEY,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          nomor_peserta TEXT NOT NULL,
+          nisn TEXT,
+          nis TEXT,
+          nama TEXT NOT NULL,
+          kelas TEXT NOT NULL,
+          UNIQUE(exam_id, nomor_peserta)
+        );
+
+        CREATE TABLE IF NOT EXISTS seats (
+          id SERIAL PRIMARY KEY,
+          room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+          kode_kursi TEXT NOT NULL,
+          baris INTEGER NOT NULL,
+          kolom INTEGER NOT NULL,
+          posisi_x INTEGER NOT NULL DEFAULT 0,
+          posisi_y INTEGER NOT NULL DEFAULT 0,
+          student_id INTEGER REFERENCES students(id) ON DELETE SET NULL,
+          UNIQUE(room_id, kode_kursi)
+        );
+
+        CREATE TABLE IF NOT EXISTS exam_schedules (
+          id SERIAL PRIMARY KEY,
+          exam_session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+          subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+          room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+          tanggal TEXT NOT NULL,
+          jam_mulai TEXT NOT NULL,
+          jam_selesai TEXT NOT NULL,
+          status_manual_cancel INTEGER NOT NULL DEFAULT 0,
+          actual_started_at TEXT,
+          actual_finished_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS supervision_assignments (
+          id SERIAL PRIMARY KEY,
+          supervisor_id INTEGER NOT NULL REFERENCES supervisors(id) ON DELETE CASCADE,
+          room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+          exam_session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+          exam_schedule_id INTEGER REFERENCES exam_schedules(id) ON DELETE CASCADE,
+          peran TEXT NOT NULL DEFAULT 'utama' CHECK (peran IN ('utama', 'pendamping')),
+          status_jadwal TEXT NOT NULL DEFAULT 'akan_datang',
+          UNIQUE(supervisor_id, exam_schedule_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS documents (
+          id SERIAL PRIMARY KEY,
+          exam_id INTEGER REFERENCES exams(id) ON DELETE SET NULL,
+          jenis TEXT NOT NULL,
+          nama_file TEXT NOT NULL,
+          path TEXT NOT NULL,
+          mime_type TEXT,
+          blob_url TEXT,
+          file_bytes BYTEA,
+          sha256 TEXT NOT NULL,
+          uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          version INTEGER NOT NULL DEFAULT 1,
+          status_verifikasi TEXT NOT NULL DEFAULT 'tersimpan',
+          needs_regeneration INTEGER NOT NULL DEFAULT 0,
+          meta_json TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS mime_type TEXT;
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS blob_url TEXT;
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_bytes BYTEA;
+
+        CREATE TABLE IF NOT EXISTS generated_doc_versions (
+          id SERIAL PRIMARY KEY,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          doc_key TEXT NOT NULL,
+          title TEXT NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1,
+          needs_regeneration INTEGER NOT NULL DEFAULT 0,
+          generated_at TEXT NOT NULL,
+          generated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          UNIQUE(exam_id, doc_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS attendance (
+          id SERIAL PRIMARY KEY,
+          student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+          exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'belum' CHECK (status IN ('hadir', 'tidak_hadir', 'belum')),
+          dicatat_oleh INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          waktu TEXT,
+          updated_version INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(student_id, exam_schedule_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS supervisor_attendance (
+          id SERIAL PRIMARY KEY,
+          assignment_id INTEGER NOT NULL UNIQUE REFERENCES supervision_assignments(id) ON DELETE CASCADE,
+          waktu_hadir TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'hadir'
+        );
+
+        CREATE TABLE IF NOT EXISTS warnings (
+          id SERIAL PRIMARY KEY,
+          student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+          exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
+          tingkat INTEGER NOT NULL CHECK (tingkat IN (1, 2, 3)),
+          alasan TEXT NOT NULL,
+          is_correction INTEGER NOT NULL DEFAULT 0,
+          corrects_warning_id INTEGER REFERENCES warnings(id),
+          dicatat_oleh INTEGER NOT NULL REFERENCES users(id),
+          dicatat_oleh_nama TEXT NOT NULL,
+          waktu_server TEXT NOT NULL,
+          idempotency_key TEXT UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS exit_permissions (
+          id SERIAL PRIMARY KEY,
+          student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+          exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
+          alasan TEXT NOT NULL,
+          waktu_keluar TEXT NOT NULL,
+          waktu_kembali TEXT,
+          durasi_detik INTEGER,
+          dicatat_oleh INTEGER NOT NULL REFERENCES users(id),
+          dicatat_oleh_nama TEXT NOT NULL,
+          idempotency_key TEXT UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS incident_reports (
+          id SERIAL PRIMARY KEY,
+          exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
+          deskripsi TEXT NOT NULL,
+          waktu TEXT NOT NULL,
+          dicatat_oleh INTEGER NOT NULL REFERENCES users(id),
+          dicatat_oleh_nama TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS supervision_reports (
+          id SERIAL PRIMARY KEY,
+          exam_schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
+          supervisor_id INTEGER NOT NULL REFERENCES supervisors(id) ON DELETE CASCADE,
+          jenis TEXT NOT NULL CHECK (jenis IN ('berita_acara', 'daftar_hadir')),
+          data_json TEXT,
+          file_path TEXT,
+          status TEXT NOT NULL DEFAULT 'belum_dikirim' CHECK (status IN ('belum_dikerjakan', 'belum_dikirim', 'menunggu_verifikasi', 'perlu_perbaikan', 'terverifikasi')),
+          dikirim_pada TEXT,
+          version INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(exam_schedule_id, jenis)
+        );
+
+        CREATE TABLE IF NOT EXISTS report_verifications (
+          id SERIAL PRIMARY KEY,
+          report_id INTEGER NOT NULL REFERENCES supervision_reports(id) ON DELETE CASCADE,
+          admin_id INTEGER NOT NULL REFERENCES users(id),
+          status TEXT NOT NULL,
+          catatan TEXT,
+          waktu TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS notifications (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          judul TEXT NOT NULL,
+          isi TEXT NOT NULL,
+          kategori TEXT NOT NULL DEFAULT 'info',
+          link_target TEXT,
+          dibaca INTEGER NOT NULL DEFAULT 0,
+          dibuat_pada TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          username TEXT,
+          aksi TEXT NOT NULL,
+          entitas TEXT NOT NULL,
+          entitas_id TEXT,
+          nilai_lama TEXT,
+          nilai_baru TEXT,
+          waktu_server TEXT NOT NULL,
+          ip TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS import_batches (
+          id SERIAL PRIMARY KEY,
+          exam_id INTEGER REFERENCES exams(id) ON DELETE SET NULL,
+          filename TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          detected_type TEXT NOT NULL,
+          confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+          status TEXT NOT NULL DEFAULT 'preview' CHECK (status IN ('preview', 'confirmed', 'failed')),
+          extracted_json TEXT NOT NULL,
+          errors_json TEXT NOT NULL DEFAULT '[]',
+          duplicates_json TEXT NOT NULL DEFAULT '[]',
+          uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL,
+          confirmed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          last_active_ms BIGINT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_config (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS room_presence (
+          schedule_id INTEGER NOT NULL REFERENCES exam_schedules(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          nama TEXT NOT NULL,
+          role TEXT NOT NULL,
+          last_seen_ms BIGINT NOT NULL,
+          PRIMARY KEY (schedule_id, user_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS rate_limits (
+          rate_key TEXT PRIMARY KEY,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          locked_until_ms BIGINT NOT NULL DEFAULT 0
+        );
+
+        CREATE OR REPLACE FUNCTION sipenguji_prevent_audit_mutation()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          RAISE EXCEPTION 'Audit log bersifat append-only dan tidak dapat diubah atau dihapus';
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS prevent_audit_update ON audit_logs;
+        CREATE TRIGGER prevent_audit_update
+          BEFORE UPDATE ON audit_logs
+          FOR EACH ROW EXECUTE FUNCTION sipenguji_prevent_audit_mutation();
+
+        DROP TRIGGER IF EXISTS prevent_audit_delete ON audit_logs;
+        CREATE TRIGGER prevent_audit_delete
+          BEFORE DELETE ON audit_logs
+          FOR EACH ROW EXECUTE FUNCTION sipenguji_prevent_audit_mutation();
+      `);
+    })().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
+  }
+  await initPromise;
 }
 
 export const ELEVEN_DOCS_CATALOG: Array<{ doc_key: string; title: string }> = [
@@ -335,7 +433,7 @@ export const ELEVEN_DOCS_CATALOG: Array<{ doc_key: string; title: string }> = [
   { doc_key: 'serah_terima', title: '11. Dokumen Serah Terima Berkas Ujian' },
 ];
 
-export function appendAuditLog(params: {
+export async function appendAuditLog(params: {
   userId?: number | null;
   username?: string | null;
   aksi: string;
@@ -344,72 +442,86 @@ export function appendAuditLog(params: {
   nilaiLama?: unknown;
   nilaiBaru?: unknown;
   ip?: string | null;
-}): void {
+}): Promise<void> {
   const now = getServerWibNow().isoWib;
-  db.prepare(
+  await execute(
     `INSERT INTO audit_logs (user_id, username, aksi, entitas, entitas_id, nilai_lama, nilai_baru, waktu_server, ip)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    params.userId ?? null,
-    params.username ?? null,
-    params.aksi,
-    params.entitas,
-    params.entitasId !== undefined && params.entitasId !== null ? String(params.entitasId) : null,
-    params.nilaiLama !== undefined ? JSON.stringify(params.nilaiLama) : null,
-    params.nilaiBaru !== undefined ? JSON.stringify(params.nilaiBaru) : null,
-    now,
-    params.ip ?? null
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [
+      params.userId ?? null,
+      params.username ?? null,
+      params.aksi,
+      params.entitas,
+      params.entitasId !== undefined && params.entitasId !== null ? String(params.entitasId) : null,
+      params.nilaiLama !== undefined ? JSON.stringify(params.nilaiLama) : null,
+      params.nilaiBaru !== undefined ? JSON.stringify(params.nilaiBaru) : null,
+      now,
+      params.ip ?? null,
+    ]
   );
 }
 
-export function createNotification(params: {
+export async function createNotification(params: {
   userId: number;
   judul: string;
   isi: string;
   kategori?: string;
   linkTarget?: string | null;
-}): number {
+}): Promise<number> {
   const now = getServerWibNow().isoWib;
-  const res = db
-    .prepare(
-      `INSERT INTO notifications (user_id, judul, isi, kategori, link_target, dibaca, dibuat_pada)
-       VALUES (?, ?, ?, ?, ?, 0, ?)`
-    )
-    .run(params.userId, params.judul, params.isi, params.kategori ?? 'info', params.linkTarget ?? null, now);
-  return Number(res.lastInsertRowid);
+  const row = await queryOne<{ id: number }>(
+    `INSERT INTO notifications (user_id, judul, isi, kategori, link_target, dibaca, dibuat_pada)
+     VALUES ($1, $2, $3, $4, $5, 0, $6)
+     RETURNING id`,
+    [params.userId, params.judul, params.isi, params.kategori ?? 'info', params.linkTarget ?? null, now]
+  );
+  return Number(row?.id ?? 0);
 }
 
-export function notifyAllAdmins(params: {
+export async function notifyAllAdmins(params: {
   judul: string;
   isi: string;
   kategori?: string;
   linkTarget?: string | null;
-}): number[] {
-  const admins = db
-    .prepare(`SELECT id FROM users WHERE role = 'admin' AND status = 'active'`)
-    .all() as Array<{ id: number }>;
-  return admins.map((a) =>
-    createNotification({
+}): Promise<number[]> {
+  const admins = await query<{ id: number }>(
+    `SELECT id FROM users WHERE role = 'admin' AND status = 'active'`
+  );
+  const ids: number[] = [];
+  for (const a of admins) {
+    const id = await createNotification({
       userId: a.id,
       judul: params.judul,
       isi: params.isi,
       kategori: params.kategori,
       linkTarget: params.linkTarget,
-    })
+    });
+    ids.push(id);
+  }
+  return ids;
+}
+
+export async function markGeneratedDocumentsStale(examId: number, client?: PoolClient): Promise<void> {
+  await execute(
+    `UPDATE generated_doc_versions SET needs_regeneration = 1 WHERE exam_id = $1`,
+    [examId],
+    client
   );
 }
 
-export function markGeneratedDocumentsStale(examId: number): void {
-  db.prepare(`UPDATE generated_doc_versions SET needs_regeneration = 1 WHERE exam_id = ?`).run(examId);
-}
-
-export function ensureGeneratedDocRows(examId: number, userId: number | null): void {
+export async function ensureGeneratedDocRows(
+  examId: number,
+  userId: number | null,
+  client?: PoolClient
+): Promise<void> {
   const now = getServerWibNow().isoWib;
-  const insert = db.prepare(
-    `INSERT OR IGNORE INTO generated_doc_versions (exam_id, doc_key, title, version, needs_regeneration, generated_at, generated_by)
-     VALUES (?, ?, ?, 1, 0, ?, ?)`
-  );
   for (const doc of ELEVEN_DOCS_CATALOG) {
-    insert.run(examId, doc.doc_key, doc.title, now, userId);
+    await execute(
+      `INSERT INTO generated_doc_versions (exam_id, doc_key, title, version, needs_regeneration, generated_at, generated_by)
+       VALUES ($1, $2, $3, 1, 0, $4, $5)
+       ON CONFLICT (exam_id, doc_key) DO NOTHING`,
+      [examId, doc.doc_key, doc.title, now, userId],
+      client
+    );
   }
 }
