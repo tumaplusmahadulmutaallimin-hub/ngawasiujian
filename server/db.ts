@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -22,6 +23,7 @@ db.exec(`
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('admin', 'supervisor')),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+    must_change_password INTEGER NOT NULL DEFAULT 0,
     last_active_at TEXT,
     created_at TEXT NOT NULL
   );
@@ -285,6 +287,39 @@ db.exec(`
     SELECT RAISE(ABORT, 'Audit log bersifat append-only dan tidak dapat dihapus');
   END;
 `);
+
+// Safe schema migration for existing SQLite databases
+const userCols = db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
+if (!userCols.some((c) => c.name === 'must_change_password')) {
+  db.exec(`ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0`);
+}
+
+// Seed initial General Admin account (admin / admin123, must change password after login) if no admin exists
+const existingAdminRow = db.prepare(`SELECT id FROM users WHERE role = 'admin' LIMIT 1`).get();
+if (!existingAdminRow) {
+  const initialAdminPassword = process.env.DEFAULT_ADMIN_PASSWORD?.trim() || 'admin123';
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(initialAdminPassword, salt, 64).toString('hex');
+  const passwordHash = `${salt}:${derived}`;
+  const now = getServerWibNow().isoWib;
+
+  const res = db
+    .prepare(
+      `INSERT INTO users (username, password_hash, role, status, must_change_password, last_active_at, created_at)
+       VALUES ('admin', ?, 'admin', 'active', 1, ?, ?)`
+    )
+    .run(passwordHash, now, now);
+
+  db.prepare(
+    `INSERT INTO audit_logs (user_id, username, aksi, entitas, entitas_id, nilai_baru, waktu_server, ip)
+     VALUES (?, 'admin', 'ADMIN_DEFAULT_SEEDED', 'users', ?, ?, ?, 'system')`
+  ).run(
+    Number(res.lastInsertRowid),
+    String(res.lastInsertRowid),
+    JSON.stringify({ username: 'admin', role: 'admin', must_change_password: true }),
+    now
+  );
+}
 
 export const ELEVEN_DOCS_CATALOG: Array<{ doc_key: string; title: string }> = [
   { doc_key: 'cover', title: '01. Cover Administrasi Pengawasan' },

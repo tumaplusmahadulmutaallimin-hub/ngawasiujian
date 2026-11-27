@@ -111,7 +111,7 @@ export function authenticateToken(token: string): AuthUser | null {
 
   const user = db
     .prepare(
-      `SELECT u.id, u.username, u.role, u.status,
+      `SELECT u.id, u.username, u.role, u.status, u.must_change_password,
               s.id AS supervisor_id, s.nama_lengkap, s.nip_nuptk, s.foto_url, s.ttd_url, s.status AS supervisor_status
        FROM users u
        LEFT JOIN supervisors s ON s.user_id = u.id
@@ -123,6 +123,7 @@ export function authenticateToken(token: string): AuthUser | null {
         username: string;
         role: 'admin' | 'supervisor';
         status: 'active' | 'inactive';
+        must_change_password: number;
         supervisor_id: number | null;
         nama_lengkap: string | null;
         nip_nuptk: string | null;
@@ -145,6 +146,7 @@ export function authenticateToken(token: string): AuthUser | null {
     nipNuptk: user.nip_nuptk,
     fotoUrl: user.foto_url,
     ttdUrl: user.ttd_url,
+    mustChangePassword: Boolean(user.must_change_password),
   };
 }
 

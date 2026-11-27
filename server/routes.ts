@@ -239,31 +239,29 @@ export function createApiRouter(): express.Router {
       return;
     }
 
-    // Support server-configured ADMIN_PASSCODE
+    // Support server-configured ADMIN_PASSCODE only if no admin user exists yet
     const envPasscode = process.env.ADMIN_PASSCODE?.trim();
-    if (envPasscode && expectedRole === 'admin' && cleanUser === 'admin' && password === envPasscode) {
-      let adminUser = db
-        .prepare(`SELECT id, status FROM users WHERE username = 'admin' AND role = 'admin'`)
-        .get() as { id: number; status: string } | undefined;
+    const existingAdminForEnv = db
+      .prepare(`SELECT id FROM users WHERE username = 'admin' AND role = 'admin'`)
+      .get();
+    if (!existingAdminForEnv && envPasscode && expectedRole === 'admin' && cleanUser === 'admin' && password === envPasscode) {
       const now = getServerWibNow().isoWib;
-      if (!adminUser) {
-        const info = db
-          .prepare(
-            `INSERT INTO users (username, password_hash, role, status, last_active_at, created_at)
-             VALUES ('admin', ?, 'admin', 'active', ?, ?)`
-          )
-          .run(hashPassword(envPasscode), now, now);
-        adminUser = { id: Number(info.lastInsertRowid), status: 'active' };
-      }
+      const info = db
+        .prepare(
+          `INSERT INTO users (username, password_hash, role, status, must_change_password, last_active_at, created_at)
+           VALUES ('admin', ?, 'admin', 'active', 1, ?, ?)`
+        )
+        .run(hashPassword(envPasscode), now, now);
+      const adminId = Number(info.lastInsertRowid);
       clearFailedAttempts(rateKey);
-      const token = createSessionToken(adminUser.id);
+      const token = createSessionToken(adminId);
       const user = authenticateToken(token);
       appendAuditLog({
-        userId: adminUser.id,
+        userId: adminId,
         username: 'admin',
         aksi: 'LOGIN_ADMIN',
         entitas: 'users',
-        entitasId: adminUser.id,
+        entitasId: adminId,
         ip,
       });
       res.json({ token, user });
@@ -346,6 +344,56 @@ export function createApiRouter(): express.Router {
 
   router.get('/auth/me', requireAuth, (req: AuthedRequest, res) => {
     res.json({ user: req.authUser, serverTime: getServerWibNow() });
+  });
+
+  router.post('/auth/change-password', requireAuth, (req: AuthedRequest, res) => {
+    const authUser = req.authUser!;
+    const { currentPassword, newPassword } = req.body as {
+      currentPassword?: string;
+      newPassword?: string;
+    };
+
+    if (!currentPassword || !newPassword) {
+      res.status(400).json({ error: 'Password saat ini dan password baru wajib diisi.' });
+      return;
+    }
+    if (newPassword.length < 8) {
+      res.status(400).json({ error: 'Password baru minimal 8 karakter.' });
+      return;
+    }
+    if (newPassword === currentPassword || newPassword.toLowerCase() === 'admin123') {
+      res.status(400).json({
+        error: 'Password baru harus berbeda dari password saat ini dan tidak boleh menggunakan password bawaan.',
+      });
+      return;
+    }
+
+    const row = db
+      .prepare(`SELECT id, username, password_hash FROM users WHERE id = ?`)
+      .get(authUser.id) as { id: number; username: string; password_hash: string } | undefined;
+
+    if (!row || !verifyPassword(currentPassword, row.password_hash)) {
+      res.status(401).json({ error: 'Password saat ini tidak sesuai.' });
+      return;
+    }
+
+    db.prepare(`UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?`).run(
+      hashPassword(newPassword),
+      authUser.id
+    );
+
+    appendAuditLog({
+      userId: authUser.id,
+      username: authUser.username,
+      aksi: 'CHANGE_PASSWORD',
+      entitas: 'users',
+      entitasId: authUser.id,
+      nilaiBaru: { must_change_password: false },
+      ip: getClientIp(req),
+    });
+
+    const updatedUser = authenticateToken(req.authToken!);
+    res.json({ ok: true, user: updatedUser });
   });
 
   // Public directory of Admin-imported supervisors for FR-AUT-02 registration

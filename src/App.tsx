@@ -54,7 +54,13 @@ export default function App() {
   }
 
   if (user.role === 'admin') {
-    return <AdminWorkspace user={user} onLogout={handleLogout} />;
+    return (
+      <AdminWorkspace
+        user={user}
+        onLogout={handleLogout}
+        onUserUpdated={(updated) => setUser(updated)}
+      />
+    );
   }
 
   return (

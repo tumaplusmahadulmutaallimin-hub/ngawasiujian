@@ -32,6 +32,7 @@ export interface AuthUser {
   nipNuptk?: string | null;
   fotoUrl?: string | null;
   ttdUrl?: string | null;
+  mustChangePassword?: boolean;
 }
 
 export interface ServerWibTime {
