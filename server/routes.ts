@@ -2197,6 +2197,128 @@ export function createApiRouter(): express.Router {
   );
 
   router.get(
+    '/admin/import/trial-data-summary',
+    requireAuth,
+    requireAdmin,
+    asyncHandler(async (_req, res) => {
+      const counts = await queryOne<Record<string, number>>(`
+        SELECT
+          (SELECT COUNT(*)::int FROM import_batches) AS batches,
+          (SELECT COUNT(*)::int FROM documents) AS documents,
+          (SELECT COUNT(*)::int FROM students) AS students,
+          (SELECT COUNT(*)::int FROM supervisors) AS supervisors,
+          (SELECT COUNT(*)::int FROM supervisors WHERE user_id IS NOT NULL) AS "supervisorsWithAccount",
+          (SELECT COUNT(*)::int FROM rooms) AS rooms,
+          (SELECT COUNT(*)::int FROM seats) AS seats,
+          (SELECT COUNT(*)::int FROM exams) AS exams,
+          (SELECT COUNT(*)::int FROM exam_schedules) AS schedules,
+          (SELECT COUNT(*)::int FROM supervision_reports) AS reports
+      `);
+      res.json(counts || {});
+    })
+  );
+
+  router.post(
+    '/admin/import/reset-trial-data',
+    requireAuth,
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      const { confirmationText, includeSupervisorAccounts } = req.body as {
+        confirmationText?: string;
+        includeSupervisorAccounts?: boolean;
+      };
+      if ((confirmationText || '').trim().toUpperCase() !== 'BERSIHKAN DATA') {
+        res.status(400).json({
+          error: 'Konfirmasi tidak sesuai. Ketik BERSIHKAN DATA untuk melanjutkan.',
+        });
+        return;
+      }
+
+      const cleared = await withTransaction(async (client) => {
+        const before = await queryOne<Record<string, number>>(
+          `SELECT
+            (SELECT COUNT(*)::int FROM import_batches) AS batches,
+            (SELECT COUNT(*)::int FROM documents) AS documents,
+            (SELECT COUNT(*)::int FROM students) AS students,
+            (SELECT COUNT(*)::int FROM supervisors) AS supervisors,
+            (SELECT COUNT(*)::int FROM rooms) AS rooms,
+            (SELECT COUNT(*)::int FROM seats) AS seats,
+            (SELECT COUNT(*)::int FROM exams) AS exams,
+            (SELECT COUNT(*)::int FROM exam_schedules) AS schedules,
+            (SELECT COUNT(*)::int FROM supervision_reports) AS reports`,
+          [],
+          client
+        );
+
+        await execute(`DELETE FROM report_verifications`, [], client);
+        await execute(`DELETE FROM supervision_reports`, [], client);
+        await execute(`DELETE FROM incident_reports`, [], client);
+        await execute(`DELETE FROM exit_permissions`, [], client);
+        await execute(`UPDATE warnings SET corrects_warning_id = NULL`, [], client);
+        await execute(`DELETE FROM warnings`, [], client);
+        await execute(`DELETE FROM attendance`, [], client);
+        await execute(`DELETE FROM supervisor_attendance`, [], client);
+        await execute(`DELETE FROM room_presence`, [], client);
+        await execute(`DELETE FROM supervision_assignments`, [], client);
+        await execute(`DELETE FROM exam_schedules`, [], client);
+        await execute(`DELETE FROM exam_sessions`, [], client);
+        await execute(`DELETE FROM generated_doc_versions`, [], client);
+        await execute(`DELETE FROM seats`, [], client);
+        await execute(`DELETE FROM students`, [], client);
+        await execute(`DELETE FROM rooms`, [], client);
+        await execute(`DELETE FROM subjects`, [], client);
+        await execute(`DELETE FROM exams`, [], client);
+        await execute(`DELETE FROM documents`, [], client);
+        await execute(`DELETE FROM import_batches`, [], client);
+        await execute(`DELETE FROM notifications`, [], client);
+
+        if (includeSupervisorAccounts) {
+          await execute(`DELETE FROM supervisors`, [], client);
+          await execute(
+            `DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE role = 'supervisor')`,
+            [],
+            client
+          );
+          await execute(
+            `DELETE FROM users
+             WHERE role = 'supervisor'
+               AND id NOT IN (SELECT DISTINCT user_id FROM audit_logs WHERE user_id IS NOT NULL)`,
+            [],
+            client
+          );
+          await execute(
+            `UPDATE users
+             SET status = 'inactive',
+                 username = CASE
+                   WHEN position('__archived_' in username) = 0 THEN username || '__archived_' || id::text
+                   ELSE username
+                 END
+             WHERE role = 'supervisor'`,
+            [],
+            client
+          );
+        } else {
+          await execute(`DELETE FROM supervisors WHERE user_id IS NULL`, [], client);
+        }
+
+        return before || {};
+      });
+
+      await appendAuditLog({
+        userId: req.authUser!.id,
+        username: req.authUser!.username,
+        aksi: 'RESET_TRIAL_DATA',
+        entitas: 'system',
+        nilaiLama: cleared,
+        nilaiBaru: { includeSupervisorAccounts: Boolean(includeSupervisorAccounts) },
+        ip: getClientIp(req),
+      });
+
+      res.json({ ok: true, cleared });
+    })
+  );
+
+  router.get(
     '/admin/import/:batchId',
     requireAuth,
     requireAdmin,

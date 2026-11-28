@@ -263,6 +263,12 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
   } | null>(null);
   const [uploadingImport, setUploadingImport] = useState(false);
   const [blobNotice, setBlobNotice] = useState<string | null>(null);
+  const [resetTrialModal, setResetTrialModal] = useState<{
+    summary: Record<string, number>;
+    confirmText: string;
+    includeSupervisorAccounts: boolean;
+    resetting: boolean;
+  } | null>(null);
 
   // Data Peserta states
   const [studentsData, setStudentsData] = useState<{
@@ -544,6 +550,57 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
       });
     } finally {
       setUploadingImport(false);
+    }
+  };
+
+  const handleOpenResetTrialModal = async () => {
+    try {
+      const summary = await apiFetch<Record<string, number>>('/api/admin/import/trial-data-summary');
+      setResetTrialModal({
+        summary,
+        confirmText: '',
+        includeSupervisorAccounts: false,
+        resetting: false,
+      });
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Gagal memuat ringkasan data uji coba.',
+        type: 'error',
+      });
+    }
+  };
+
+  const handleConfirmResetTrialData = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetTrialModal) return;
+    setResetTrialModal({ ...resetTrialModal, resetting: true });
+    try {
+      const res = await apiFetch<{ ok: boolean; cleared: Record<string, number> }>(
+        '/api/admin/import/reset-trial-data',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            confirmationText: resetTrialModal.confirmText,
+            includeSupervisorAccounts: resetTrialModal.includeSupervisorAccounts,
+          }),
+        }
+      );
+      setResetTrialModal(null);
+      setActiveBatch(null);
+      setLastImportResult(null);
+      setStageError(null);
+      setStageFiles({});
+      setToast({
+        message: `Data uji coba berhasil dibersihkan (${res.cleared.students ?? 0} peserta, ${res.cleared.batches ?? 0} riwayat impor, ${res.cleared.schedules ?? 0} jadwal). Silakan impor ulang dokumen SAUM.`,
+        type: 'success',
+      });
+      await loadSectionData();
+    } catch (err) {
+      setResetTrialModal((prev) => (prev ? { ...prev, resetting: false } : null));
+      setToast({
+        message: err instanceof Error ? err.message : 'Gagal membersihkan data uji coba.',
+        type: 'error',
+      });
     }
   };
 
@@ -1584,14 +1641,25 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
                           Unggah dan proses satu per satu sesuai jenis dokumen SAUM. Mendukung XLSX, CSV, PDF teks, PDF scan OCR, dan gambar (PNG/JPG). Sel yang tidak terbaca ditandai dan tidak ditebak otomatis.
                         </p>
                       </div>
-                      <button
-                        type="button"
-                        disabled={uploadingImport}
-                        onClick={handleLoadSampleSaum}
-                        className="px-4 py-2.5 rounded-xl border border-[#087F5B] bg-[#E8F5EF] hover:bg-[#d3eee1] text-[#087F5B] text-xs font-bold min-h-[42px] transition-colors shrink-0"
-                      >
-                        Muat Paket Sampel SAUM (Siap Uji)
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          disabled={uploadingImport}
+                          onClick={handleLoadSampleSaum}
+                          className="px-4 py-2.5 rounded-xl border border-[#087F5B] bg-[#E8F5EF] hover:bg-[#d3eee1] text-[#087F5B] text-xs font-bold min-h-[42px] transition-colors"
+                        >
+                          Muat Paket Sampel SAUM (Siap Uji)
+                        </button>
+                        <button
+                          type="button"
+                          disabled={uploadingImport}
+                          onClick={handleOpenResetTrialModal}
+                          className="px-4 py-2.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-800 text-xs font-bold min-h-[42px] transition-colors inline-flex items-center gap-1.5"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Bersihkan Data Uji Coba
+                        </button>
+                      </div>
                     </div>
 
                     {blobNotice && (
@@ -3609,6 +3677,107 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Bersihkan Data Uji Coba Modal */}
+      {resetTrialModal && (
+        <div className="fixed inset-0 z-50 bg-[#10243A]/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <form
+            onSubmit={handleConfirmResetTrialData}
+            className="bg-white rounded-2xl border border-[#E5EAF0] max-w-lg w-full p-6 space-y-4 shadow-elevated"
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-[#E5EAF0] pb-3">
+              <div>
+                <h3 className="font-display text-base font-bold text-[#10243A] flex items-center gap-2">
+                  <Trash2 className="w-4 h-4 text-rose-600" />
+                  <span>Bersihkan Data Uji Coba</span>
+                </h3>
+                <p className="text-xs text-[#718096] mt-1">
+                  Menghapus data impor dan data ujian uji coba agar Anda dapat melakukan impor ulang dari awal. Akun Admin dan Audit Log tetap aman.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResetTrialModal(null)}
+                className="text-[#718096] hover:text-[#172B4D] p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
+              {(
+                [
+                  ['Data Peserta', resetTrialModal.summary.students ?? 0],
+                  ['Riwayat Impor', resetTrialModal.summary.batches ?? 0],
+                  ['Arsip Dokumen', resetTrialModal.summary.documents ?? 0],
+                  ['Data Pengawas', resetTrialModal.summary.supervisors ?? 0],
+                  ['Ruang & Kursi', `${resetTrialModal.summary.rooms ?? 0} / ${resetTrialModal.summary.seats ?? 0}`],
+                  ['Jadwal & Laporan', `${resetTrialModal.summary.schedules ?? 0} / ${resetTrialModal.summary.reports ?? 0}`],
+                ] as const
+              ).map(([lbl, val]) => (
+                <div key={lbl} className="p-2.5 rounded-xl bg-[#F5F7FA] border border-[#E5EAF0]">
+                  <span className="text-[11px] text-[#718096] block">{lbl}</span>
+                  <strong className="font-mono-tabular text-[#10243A]">{val}</strong>
+                </div>
+              ))}
+            </div>
+
+            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-950 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={resetTrialModal.includeSupervisorAccounts}
+                onChange={(e) =>
+                  setResetTrialModal({
+                    ...resetTrialModal,
+                    includeSupervisorAccounts: e.target.checked,
+                  })
+                }
+                className="mt-0.5 rounded border-amber-400"
+              />
+              <span>
+                Hapus juga akun pengawas uji coba yang sudah aktif (
+                <strong>{resetTrialModal.summary.supervisorsWithAccount ?? 0}</strong> akun). Jika tidak dicentang, hanya pengawas hasil impor tanpa akun yang dibersihkan.
+              </span>
+            </label>
+
+            <div>
+              <label className="block text-xs font-semibold text-[#172B4D] mb-1.5">
+                Ketik <code className="px-1.5 py-0.5 rounded bg-rose-50 text-rose-800">BERSIHKAN DATA</code> untuk konfirmasi
+              </label>
+              <input
+                type="text"
+                required
+                value={resetTrialModal.confirmText}
+                onChange={(e) =>
+                  setResetTrialModal({ ...resetTrialModal, confirmText: e.target.value })
+                }
+                placeholder="BERSIHKAN DATA"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E5EAF0] text-sm font-mono-tabular min-h-[42px]"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setResetTrialModal(null)}
+                className="px-4 py-2 rounded-xl border border-[#E5EAF0] text-xs font-semibold"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                disabled={
+                  resetTrialModal.resetting ||
+                  resetTrialModal.confirmText.trim().toUpperCase() !== 'BERSIHKAN DATA'
+                }
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-semibold"
+              >
+                {resetTrialModal.resetting ? 'Membersihkan...' : 'Ya, Bersihkan Data Uji Coba'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 
