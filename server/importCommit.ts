@@ -1032,6 +1032,28 @@ export async function commitImportBatch(params: {
         supervisorByLowerName.set(sp.nama_lengkap.trim().toLowerCase(), Number(sp.id));
       }
 
+      const parsedRows: Array<{
+        tanggal: string;
+        jamMulai: string;
+        jamSelesai: string;
+        namaSesi: string;
+        sessKey: string;
+        kodeMapel: string;
+        mapelNama: string;
+        kodeRuang: string;
+        pengawasUtama: string | null;
+        pengawasPendamping: string | null;
+      }> = [];
+
+      const sessionsToCreate = new Map<
+        string,
+        { namaSesi: string; tanggal: string; jamMulai: string; jamSelesai: string }
+      >();
+      const subjectsToCreate = new Map<string, { kode: string; nama: string }>();
+      const pendingSubjectLowerToCode = new Map<string, string>();
+      const roomsToCreate = new Map<string, string>();
+      const supervisorsToCreate = new Map<string, string>();
+
       for (let i = 0; i < params.rows.length; i++) {
         const r = params.rows[i];
         const tanggal = cleanStr(r.tanggal) || getServerWibNow().date;
@@ -1055,131 +1077,329 @@ export async function commitImportBatch(params: {
           continue;
         }
 
-        const slotKey = `${kodeRuang}|${tanggal}|${jamMulai}`;
+        const namaSesi = cleanStr(r.nama_sesi ?? r.sesi) || 'Sesi 1';
+        const slotKey = `${namaSesi}|${kodeRuang}|${tanggal}|${jamMulai}`;
         if (seenSlots.has(slotKey)) {
           duplicatesCount++;
           failureReasons.push({
             rowIndex: i,
             field: 'kode_ruang',
-            value: `${kodeRuang} (${tanggal} ${jamMulai})`,
-            reason: 'Jadwal ruang & jam yang sama duplikat di dalam berkas',
+            value: `${namaSesi} · ${kodeRuang} (${tanggal} ${jamMulai})`,
+            reason: 'Jadwal sesi, ruang & jam yang sama duplikat di dalam berkas',
           });
           continue;
         }
         seenSlots.add(slotKey);
 
-        const namaSesi = cleanStr(r.nama_sesi ?? r.sesi) || 'Sesi 1';
-        const kodeMapel =
-          cleanStr(r.kode_mapel) ||
-          mapelNama.toUpperCase().replace(/[^A-Z0-9]+/g, '-').slice(0, 12);
-
         const sessKey = `${namaSesi}|${tanggal}`;
-        let sessId = sessionByKey.get(sessKey);
-        if (!sessId) {
-          const insertedSess = await queryOne<{ id: number }>(
-            `INSERT INTO exam_sessions (exam_id, nama_sesi, tanggal, jam_mulai, jam_selesai)
-             VALUES ($1, $2, $3, $4, $5)
-             RETURNING id`,
-            [examId, namaSesi, tanggal, jamMulai, jamSelesai],
-            client
-          );
-          sessId = Number(insertedSess!.id);
-          sessionByKey.set(sessKey, sessId);
+        if (!sessionByKey.has(sessKey) && !sessionsToCreate.has(sessKey)) {
+          sessionsToCreate.set(sessKey, { namaSesi, tanggal, jamMulai, jamSelesai });
         }
 
-        let subjId = subjectByCode.get(kodeMapel) ?? subjectByLowerName.get(mapelNama.toLowerCase());
-        if (!subjId) {
-          const insertedSubj = await queryOne<{ id: number }>(
-            `INSERT INTO subjects (kode, nama) VALUES ($1, $2) RETURNING id`,
-            [kodeMapel, mapelNama],
-            client
-          );
-          subjId = Number(insertedSubj!.id);
-          subjectByCode.set(kodeMapel, subjId);
-          subjectByLowerName.set(mapelNama.toLowerCase(), subjId);
+        const rawKodeMapel = cleanStr(r.kode_mapel);
+        const mapelLower = mapelNama.toLowerCase();
+        let resolvedKodeMapel = rawKodeMapel;
+        if (!resolvedKodeMapel) {
+          if (subjectByLowerName.has(mapelLower)) {
+            resolvedKodeMapel = '';
+          } else if (pendingSubjectLowerToCode.has(mapelLower)) {
+            resolvedKodeMapel = pendingSubjectLowerToCode.get(mapelLower)!;
+          } else {
+            const base =
+              mapelNama.toUpperCase().replace(/[^A-Z0-9]+/g, '-').slice(0, 12) || 'MAPEL';
+            let candidate = base;
+            let suffix = 2;
+            while (
+              (subjectByCode.has(candidate) || subjectsToCreate.has(candidate)) &&
+              suffix < 100
+            ) {
+              candidate = `${base.slice(0, 9)}-${suffix}`;
+              suffix++;
+            }
+            resolvedKodeMapel = candidate;
+          }
         }
 
-        let roomId = roomByKode.get(kodeRuang);
-        if (!roomId) {
-          const namaRuang = cleanStr(r.nama_ruang) || `Ruang ${kodeRuang}`;
-          const insertedRoom = await queryOne<{ id: number }>(
-            `INSERT INTO rooms (kode, nama, kapasitas, rows_count, cols_count)
-             VALUES ($1, $2, 20, 4, 5)
-             RETURNING id`,
-            [kodeRuang, namaRuang],
-            client
-          );
-          roomId = Number(insertedRoom!.id);
-          roomByKode.set(kodeRuang, roomId);
+        const hasSubject =
+          (resolvedKodeMapel && subjectByCode.has(resolvedKodeMapel)) ||
+          subjectByLowerName.has(mapelLower) ||
+          (resolvedKodeMapel && subjectsToCreate.has(resolvedKodeMapel)) ||
+          pendingSubjectLowerToCode.has(mapelLower);
+
+        if (!hasSubject && resolvedKodeMapel) {
+          subjectsToCreate.set(resolvedKodeMapel, { kode: resolvedKodeMapel, nama: mapelNama });
+          pendingSubjectLowerToCode.set(mapelLower, resolvedKodeMapel);
         }
 
-        const schedKey = `${sessId}|${roomId}|${tanggal}|${jamMulai}`;
+        if (!roomByKode.has(kodeRuang) && !roomsToCreate.has(kodeRuang)) {
+          roomsToCreate.set(kodeRuang, cleanStr(r.nama_ruang) || `Ruang ${kodeRuang}`);
+        }
+
+        const pengawasUtama = cleanStr(r.pengawas_utama);
+        const pengawasPendamping = cleanStr(r.pengawas_pendamping);
+        if (pengawasUtama) {
+          const lower = pengawasUtama.toLowerCase();
+          if (!supervisorByLowerName.has(lower) && !supervisorsToCreate.has(lower)) {
+            supervisorsToCreate.set(lower, pengawasUtama);
+          }
+        }
+        if (pengawasPendamping) {
+          const lower = pengawasPendamping.toLowerCase();
+          if (!supervisorByLowerName.has(lower) && !supervisorsToCreate.has(lower)) {
+            supervisorsToCreate.set(lower, pengawasPendamping);
+          }
+        }
+
+        parsedRows.push({
+          tanggal,
+          jamMulai,
+          jamSelesai,
+          namaSesi,
+          sessKey,
+          kodeMapel: resolvedKodeMapel,
+          mapelNama,
+          kodeRuang,
+          pengawasUtama,
+          pengawasPendamping,
+        });
+      }
+
+      if (sessionsToCreate.size > 0) {
+        const list = Array.from(sessionsToCreate.values());
+        const createdSessions = await query<{ id: number; nama_sesi: string; tanggal: string }>(
+          `INSERT INTO exam_sessions (exam_id, nama_sesi, tanggal, jam_mulai, jam_selesai)
+           SELECT $1, v.nama_sesi, v.tanggal, v.jam_mulai, v.jam_selesai
+           FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[]) AS v(
+             nama_sesi, tanggal, jam_mulai, jam_selesai
+           )
+           RETURNING id, nama_sesi, tanggal`,
+          [
+            examId,
+            list.map((s) => s.namaSesi),
+            list.map((s) => s.tanggal),
+            list.map((s) => s.jamMulai),
+            list.map((s) => s.jamSelesai),
+          ],
+          client
+        );
+        for (const s of createdSessions) {
+          sessionByKey.set(`${s.nama_sesi}|${s.tanggal}`, Number(s.id));
+        }
+      }
+
+      if (subjectsToCreate.size > 0) {
+        const list = Array.from(subjectsToCreate.values());
+        const createdSubjects = await query<{ id: number; kode: string; nama: string }>(
+          `INSERT INTO subjects (kode, nama)
+           SELECT v.kode, v.nama
+           FROM UNNEST($1::text[], $2::text[]) AS v(kode, nama)
+           ON CONFLICT (kode) DO NOTHING
+           RETURNING id, kode, nama`,
+          [list.map((s) => s.kode), list.map((s) => s.nama)],
+          client
+        );
+        for (const sb of createdSubjects) {
+          subjectByCode.set(sb.kode, Number(sb.id));
+          subjectByLowerName.set(sb.nama.trim().toLowerCase(), Number(sb.id));
+        }
+      }
+
+      if (roomsToCreate.size > 0) {
+        const codes = Array.from(roomsToCreate.keys());
+        const createdRooms = await query<{ id: number; kode: string }>(
+          `INSERT INTO rooms (kode, nama, kapasitas, rows_count, cols_count)
+           SELECT v.kode, v.nama, 20, 4, 5
+           FROM UNNEST($1::text[], $2::text[]) AS v(kode, nama)
+           ON CONFLICT (kode) DO NOTHING
+           RETURNING id, kode`,
+          [codes, codes.map((c) => roomsToCreate.get(c)!)],
+          client
+        );
+        for (const rm of createdRooms) {
+          roomByKode.set(String(rm.kode).trim(), Number(rm.id));
+        }
+      }
+
+      if (supervisorsToCreate.size > 0) {
+        const names = Array.from(supervisorsToCreate.values());
+        const createdSups = await query<{ id: number; nama_lengkap: string }>(
+          `INSERT INTO supervisors (nama_lengkap, status, created_at)
+           SELECT v.nama_lengkap, 'active', $2
+           FROM UNNEST($1::text[]) AS v(nama_lengkap)
+           RETURNING id, nama_lengkap`,
+          [names, now],
+          client
+        );
+        for (const sp of createdSups) {
+          supervisorByLowerName.set(sp.nama_lengkap.trim().toLowerCase(), Number(sp.id));
+        }
+      }
+
+      const schedulesToInsert: Array<{
+        sessId: number;
+        subjId: number;
+        roomId: number;
+        tanggal: string;
+        jamMulai: string;
+        jamSelesai: string;
+        schedKey: string;
+      }> = [];
+      const schedulesToUpdate: Array<{ id: number; subjId: number; jamSelesai: string }> = [];
+      const rowScheduleRefs: Array<{
+        schedKey: string;
+        sessId: number;
+        roomId: number;
+        pengawasUtama: string | null;
+        pengawasPendamping: string | null;
+      }> = [];
+
+      for (const row of parsedRows) {
+        const sessId = sessionByKey.get(row.sessKey);
+        const subjId =
+          (row.kodeMapel ? subjectByCode.get(row.kodeMapel) : undefined) ??
+          subjectByLowerName.get(row.mapelNama.toLowerCase());
+        const roomId = roomByKode.get(row.kodeRuang);
+        if (!sessId || !subjId || !roomId) continue;
+
+        const schedKey = `${sessId}|${roomId}|${row.tanggal}|${row.jamMulai}`;
         const existingSched = scheduleByKey.get(schedKey);
-        let schedId: number;
         if (!existingSched) {
-          const insertedSched = await queryOne<{ id: number }>(
-            `INSERT INTO exam_schedules (exam_session_id, subject_id, room_id, tanggal, jam_mulai, jam_selesai)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             RETURNING id`,
-            [sessId, subjId, roomId, tanggal, jamMulai, jamSelesai],
-            client
-          );
-          schedId = Number(insertedSched!.id);
+          schedulesToInsert.push({
+            sessId,
+            subjId,
+            roomId,
+            tanggal: row.tanggal,
+            jamMulai: row.jamMulai,
+            jamSelesai: row.jamSelesai,
+            schedKey,
+          });
           scheduleByKey.set(schedKey, {
-            id: schedId,
+            id: -1,
             exam_session_id: sessId,
             room_id: roomId,
-            tanggal,
-            jam_mulai: jamMulai,
+            tanggal: row.tanggal,
+            jam_mulai: row.jamMulai,
             subject_id: subjId,
-            jam_selesai: jamSelesai,
+            jam_selesai: row.jamSelesai,
           });
           inserted++;
+        } else if (
+          Number(existingSched.subject_id) === subjId &&
+          String(existingSched.jam_selesai) === row.jamSelesai
+        ) {
+          unchanged++;
         } else {
-          schedId = Number(existingSched.id);
-          if (
-            Number(existingSched.subject_id) === subjId &&
-            String(existingSched.jam_selesai) === jamSelesai
-          ) {
-            unchanged++;
-          } else {
-            await execute(
-              `UPDATE exam_schedules SET subject_id = $1, jam_selesai = $2 WHERE id = $3`,
-              [subjId, jamSelesai, schedId],
-              client
-            );
-            existingSched.subject_id = subjId;
-            existingSched.jam_selesai = jamSelesai;
-            updated++;
+          if (Number(existingSched.id) > 0) {
+            schedulesToUpdate.push({
+              id: Number(existingSched.id),
+              subjId,
+              jamSelesai: row.jamSelesai,
+            });
           }
+          existingSched.subject_id = subjId;
+          existingSched.jam_selesai = row.jamSelesai;
+          updated++;
         }
 
-        const assignSupervisor = async (rawName: unknown, peran: 'utama' | 'pendamping') => {
-          const namaSup = cleanStr(rawName);
-          if (!namaSup) return;
-          let supId = supervisorByLowerName.get(namaSup.toLowerCase());
-          if (!supId) {
-            const insertedSup = await queryOne<{ id: number }>(
-              `INSERT INTO supervisors (nama_lengkap, status, created_at)
-               VALUES ($1, 'active', $2)
-               RETURNING id`,
-              [namaSup, now],
-              client
-            );
-            supId = Number(insertedSup!.id);
-            supervisorByLowerName.set(namaSup.toLowerCase(), supId);
-          }
-          await execute(
-            `INSERT INTO supervision_assignments (supervisor_id, room_id, exam_session_id, exam_schedule_id, peran, status_jadwal)
-             VALUES ($1, $2, $3, $4, $5, 'akan_datang')
-             ON CONFLICT (supervisor_id, exam_schedule_id) DO UPDATE SET peran = EXCLUDED.peran`,
-            [supId, roomId, sessId, schedId, peran],
-            client
-          );
-        };
+        rowScheduleRefs.push({
+          schedKey,
+          sessId,
+          roomId,
+          pengawasUtama: row.pengawasUtama,
+          pengawasPendamping: row.pengawasPendamping,
+        });
+      }
 
-        await assignSupervisor(r.pengawas_utama, 'utama');
-        await assignSupervisor(r.pengawas_pendamping, 'pendamping');
+      if (schedulesToUpdate.length > 0) {
+        await execute(
+          `UPDATE exam_schedules AS es
+           SET subject_id = v.subject_id,
+               jam_selesai = v.jam_selesai
+           FROM UNNEST($1::int[], $2::int[], $3::text[]) AS v(id, subject_id, jam_selesai)
+           WHERE es.id = v.id`,
+          [
+            schedulesToUpdate.map((s) => s.id),
+            schedulesToUpdate.map((s) => s.subjId),
+            schedulesToUpdate.map((s) => s.jamSelesai),
+          ],
+          client
+        );
+      }
+
+      if (schedulesToInsert.length > 0) {
+        const insertedSchedules = await query<{
+          id: number;
+          exam_session_id: number;
+          room_id: number;
+          tanggal: string;
+          jam_mulai: string;
+        }>(
+          `INSERT INTO exam_schedules (exam_session_id, subject_id, room_id, tanggal, jam_mulai, jam_selesai)
+           SELECT v.sess_id, v.subj_id, v.room_id, v.tanggal, v.jam_mulai, v.jam_selesai
+           FROM UNNEST($1::int[], $2::int[], $3::int[], $4::text[], $5::text[], $6::text[]) AS v(
+             sess_id, subj_id, room_id, tanggal, jam_mulai, jam_selesai
+           )
+           RETURNING id, exam_session_id, room_id, tanggal, jam_mulai`,
+          [
+            schedulesToInsert.map((s) => s.sessId),
+            schedulesToInsert.map((s) => s.subjId),
+            schedulesToInsert.map((s) => s.roomId),
+            schedulesToInsert.map((s) => s.tanggal),
+            schedulesToInsert.map((s) => s.jamMulai),
+            schedulesToInsert.map((s) => s.jamSelesai),
+          ],
+          client
+        );
+        for (const sc of insertedSchedules) {
+          const key = `${Number(sc.exam_session_id)}|${Number(sc.room_id)}|${sc.tanggal}|${sc.jam_mulai}`;
+          const prev = scheduleByKey.get(key);
+          if (prev) prev.id = Number(sc.id);
+        }
+      }
+
+      const assignmentMap = new Map<
+        string,
+        { supId: number; roomId: number; sessId: number; schedId: number; peran: 'utama' | 'pendamping' }
+      >();
+      const queueAssignment = (
+        rawName: string | null,
+        peran: 'utama' | 'pendamping',
+        roomId: number,
+        sessId: number,
+        schedId: number
+      ) => {
+        if (!rawName) return;
+        const supId = supervisorByLowerName.get(rawName.toLowerCase());
+        if (!supId) return;
+        assignmentMap.set(`${supId}|${schedId}`, { supId, roomId, sessId, schedId, peran });
+      };
+
+      for (const ref of rowScheduleRefs) {
+        const sched = scheduleByKey.get(ref.schedKey);
+        if (!sched || Number(sched.id) <= 0) continue;
+        const schedId = Number(sched.id);
+        queueAssignment(ref.pengawasPendamping, 'pendamping', ref.roomId, ref.sessId, schedId);
+        queueAssignment(ref.pengawasUtama, 'utama', ref.roomId, ref.sessId, schedId);
+      }
+
+      const assignments = Array.from(assignmentMap.values());
+      if (assignments.length > 0) {
+        await execute(
+          `INSERT INTO supervision_assignments (supervisor_id, room_id, exam_session_id, exam_schedule_id, peran, status_jadwal)
+           SELECT v.sup_id, v.room_id, v.sess_id, v.sched_id, v.peran, 'akan_datang'
+           FROM UNNEST($1::int[], $2::int[], $3::int[], $4::int[], $5::text[]) AS v(
+             sup_id, room_id, sess_id, sched_id, peran
+           )
+           ON CONFLICT (supervisor_id, exam_schedule_id) DO UPDATE SET peran = EXCLUDED.peran`,
+          [
+            assignments.map((a) => a.supId),
+            assignments.map((a) => a.roomId),
+            assignments.map((a) => a.sessId),
+            assignments.map((a) => a.schedId),
+            assignments.map((a) => a.peran),
+          ],
+          client
+        );
       }
     } else {
       // dokumen_pendukung (narrative/supporting archive): preserve archive cleanly without inventing structured rows

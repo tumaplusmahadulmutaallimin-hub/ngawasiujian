@@ -416,13 +416,14 @@ export async function detectDuplicatesAndUnreadable(
 
     if ((docType === 'jadwal_ujian' || docType === 'jadwal_pengawasan') && (row.kode_ruang || row.ruang) && row.tanggal && row.jam_mulai) {
       const ruangVal = row.kode_ruang ?? row.ruang;
-      const slot = `${ruangVal}|${row.tanggal}|${row.jam_mulai}`;
+      const sesiVal = normVal(row.nama_sesi ?? row.sesi) || 'Sesi 1';
+      const slot = `${sesiVal}|${ruangVal}|${row.tanggal}|${row.jam_mulai}`;
       if (seenScheduleSlot.has(slot)) {
         duplicates.push({
           rowIndex,
           field: 'kode_ruang',
-          value: `${ruangVal} (${row.tanggal} ${row.jam_mulai})`,
-          source: 'Jadwal ruang & waktu bertabrakan di berkas',
+          value: `${sesiVal} · ${ruangVal} (${row.tanggal} ${row.jam_mulai})`,
+          source: 'Jadwal sesi, ruang & waktu bertabrakan di berkas',
         });
       } else {
         seenScheduleSlot.add(slot);
