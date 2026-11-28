@@ -10,7 +10,7 @@ import type {
   ImportRowIssue,
   ImportSummaryReport,
 } from '../src/types.ts';
-import { isDatabaseConfigured, queryOne } from './db.ts';
+import { isDatabaseConfigured, query, queryOne } from './db.ts';
 import { getServerWibNow } from './time.ts';
 
 export interface ExtractionResult {
@@ -267,11 +267,40 @@ export async function detectDuplicatesAndUnreadable(
   let failedCount = 0;
   let duplicatesCount = 0;
 
-  // Determine target exam_id for checking student diffing
+  // Determine target exam_id for checking student diffing (single bulk query to avoid N+1 timeouts on serverless)
   let effectiveExamId = examId || null;
   if (!effectiveExamId && docType === 'data_peserta' && isDatabaseConfigured()) {
     const latestExam = await queryOne<{ id: number }>(`SELECT id FROM exams ORDER BY id DESC LIMIT 1`);
     effectiveExamId = latestExam ? Number(latestExam.id) : null;
+  }
+
+  type ExistingStudentDiffRow = {
+    no_urut: string | null;
+    nisn: string | null;
+    nis: string | null;
+    nama: string;
+    jk: string | null;
+    kelas: string;
+    user_ujian: string | null;
+    password_ujian: string | null;
+    sesi: string | null;
+    ruang: string | null;
+    meja: string | null;
+    status: string | null;
+    nomor_peserta: string;
+  };
+  const existingStudentsMap = new Map<string, ExistingStudentDiffRow>();
+  if (effectiveExamId && isDatabaseConfigured() && docType === 'data_peserta') {
+    const existingList = await query<ExistingStudentDiffRow>(
+      `SELECT no_urut, nisn, nis, nama, jk, kelas, user_ujian, password_ujian, sesi, ruang, meja, status, nomor_peserta
+       FROM students WHERE exam_id = $1`,
+      [effectiveExamId]
+    );
+    for (const st of existingList) {
+      if (st.nomor_peserta) {
+        existingStudentsMap.set(String(st.nomor_peserta).trim(), st);
+      }
+    }
   }
 
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
@@ -308,24 +337,7 @@ export async function detectDuplicatesAndUnreadable(
       } else {
         seenNomorPeserta.add(key);
         if (effectiveExamId && isDatabaseConfigured() && docType === 'data_peserta' && !rowFailed) {
-          const existing = await queryOne<{
-            no_urut: string | null;
-            nisn: string | null;
-            nis: string | null;
-            nama: string;
-            jk: string | null;
-            kelas: string;
-            user_ujian: string | null;
-            password_ujian: string | null;
-            sesi: string | null;
-            ruang: string | null;
-            meja: string | null;
-            status: string | null;
-          }>(
-            `SELECT no_urut, nisn, nis, nama, jk, kelas, user_ujian, password_ujian, sesi, ruang, meja, status
-             FROM students WHERE exam_id = $1 AND nomor_peserta = $2`,
-            [effectiveExamId, key]
-          );
+          const existing = existingStudentsMap.get(key) ?? null;
 
           if (existing) {
             const incomingNama = normVal(row.nama ?? row.nama_lengkap);

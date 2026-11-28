@@ -56,6 +56,8 @@ export async function apiFetch<T>(
       (typeof errObj.error === 'string' && errObj.error) ||
       (res.status === 404
         ? 'Layanan API tidak ditemukan (404). Muat ulang halaman atau buka melalui URL pratinjau aplikasi aktif.'
+        : res.status === 504
+        ? 'Waktu proses server habis (504 Timeout). Coba ulangi atau periksa kembali ukuran dokumen.'
         : `Permintaan gagal (${res.status})`);
     throw new ApiError(message, res.status, errObj);
   }

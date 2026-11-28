@@ -520,15 +520,16 @@ export const AdminWorkspace: React.FC<AdminWorkspaceProps> = ({
             : `Berkas "${file.name}" terbaca (${rowCount} baris). Silakan periksa pratinjau lalu klik KONFIRMASI SIMPAN.`,
         type: 'success',
       });
+      setProcessingStage(null);
+      setUploadingImport(false);
       await loadSectionData();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Gagal mengunggah dan memproses dokumen.';
       setStageError({ stageKey, message: msg });
       setToast({ message: msg, type: 'error' });
-      await loadSectionData();
-    } finally {
       setProcessingStage(null);
       setUploadingImport(false);
+      await loadSectionData();
     }
   };
 
